@@ -2,39 +2,50 @@
   <img src="Assets/VoiceIcon.png" width="140" alt="VOICE">
 </p>
 
-# VOICE — Greek Voice Keyboard & Read-Aloud (Linux / Wayland / KDE)
+<h1 align="center">VOICE — Greek Voice Keyboard &amp; Read-Aloud</h1>
 
-**V.O.I.C.E** — *Voice On-device Intelligent Control Environment.*
+<p align="center">
+  <em>V.O.I.C.E — Voice On-device Intelligent Control Environment</em><br>
+  Fully <strong>local, offline</strong> Greek speech-to-text &amp; text-to-speech for Linux — no GPU, no cloud.
+</p>
 
-A fully **local, offline** Greek voice toolkit for Linux — no GPU, no cloud.
-Built as the base for an accessibility tool: talk to type, and have any text read back.
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-v0.0.1-5b8cff">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20Wayland%20%C2%B7%20KDE-1e1f2b">
+  <img alt="deps" src="https://img.shields.io/badge/UI-pure%20Tkinter%20(no%20pip)-3a3d52">
+  <img alt="license" src="https://img.shields.io/badge/license-see%20LICENSE-lightgrey">
+</p>
+
+---
+
+Built as the base for an accessibility tool: **talk to type**, and have **any text read back** to you. All inference runs on-device — your voice never leaves your computer.
 
 - **🎤 Dictation (STT)** — speak Greek, it types/pastes into any app. Engine: [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (CPU).
-- **📖 Read-aloud (TTS)** — select text / PDF / clipboard and hear it in Greek. Engine: [Piper](https://github.com/rhasspy/piper).
-- **Voice remote** — pick a target app (Claude, KWrite, browser…); dictated text lands there via KWin window activation + clipboard paste.
-- **Hands-free** continuous mode with automatic pause detection (VAD).
-- **Mini mode** — tiny floating bar with 🎤 / 🔊.
-- **Global shortcuts** + in-app keyboard navigation.
+- **📖 Read-aloud (TTS)** — load a PDF, paste, or type, then hear it in Greek. Engine: [Piper](https://github.com/rhasspy/piper).
+- **🎯 Voice remote** — pick a target app (Claude, KWrite, browser…); dictated text lands there via KWin window activation + clipboard paste.
+- **🔁 Hands-free** continuous mode with automatic pause detection (VAD).
+- **🔽 Mini mode** — a tiny always-on-top floating bar with 🎤 / 🔊.
+- **📍 System-tray icon** — close to the tray; right-click to talk, read, or quit.
+- **⌨ Global shortcuts** + in-app keyboard navigation.
 
 Runs comfortably on an 8-core CPU / 8 GB RAM machine.
 
-## Components
-| File | Role |
-|------|------|
-| `voice_keyboard.py` | Main app — tabbed window (Dictation / Reading / Settings) |
-| `read_aloud.py` | Reading view (also runnable standalone) |
-| `dictate.sh` | Push-to-talk dictation, for a global hotkey |
-| `speak.sh` | Read selection/clipboard aloud, for a global hotkey |
-| `SETUP.md` | Full install & permission setup |
+## Screenshots
+
+| 🎤 Dictation | 📖 Read-aloud | ⚙ Settings |
+|:---:|:---:|:---:|
+| ![Dictation panel](Screenshots/dictation.png) | ![Read-aloud panel](Screenshots/read-aloud.png) | ![Settings panel](Screenshots/settings.png) |
+| Pick where text goes, talk, live mic level, continuous mode | Read selection / clipboard / PDF, pick voice &amp; speed | Mic, global shortcuts, in-app keys |
 
 ## Quick setup
-See [SETUP.md](SETUP.md). In short:
+
+See [SETUP.md](SETUP.md) for the full walkthrough (permissions, ydotool daemon, Piper voice). In short:
 
 ```bash
 # 1. engines
 sudo dnf install -y ydotool gcc-c++ cmake make poppler-utils
 
-# 2. build whisper.cpp (CPU-only, ~1 MB binary)
+# 2. build whisper.cpp (CPU-only, small binary)
 git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git
 cmake -S whisper.cpp -B whisper.cpp/build -DGGML_NATIVE=ON && cmake --build whisper.cpp/build -j8
 
@@ -47,11 +58,39 @@ curl -L -o models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/re
 python3 voice_keyboard.py
 ```
 
+> **Note:** the large `models/`, `voices/`, and `whisper.cpp/` directories are **not** versioned — they are fetched by the setup steps above.
+
+## Usage
+
+- **Dictation tab** — choose **Στόχος** (target app, or "active window"), press the mic (or the global shortcut) and speak. Text is pasted into the target.
+- **Continuous mode** — tick *Συνεχής λειτουργία*; it transcribes and delivers on every pause.
+- **Read-aloud tab** — open a PDF / paste / type, select text, press *Διάβασε επιλογή* (or *Διάβασε όλα*).
+- **Mini mode** — collapse to a floating 🎤 / 🔊 bar; great for overlaying any window.
+- **Tray** — closing the window keeps VOICE running in the system tray; use **Έξοδος** to quit fully.
+
+Global shortcuts are set in **Ρυθμίσεις** (press *Όρισε* and hit the combo) — e.g. `Ctrl+Shift+Z` to dictate, `Ctrl+Shift+S` to read.
+
+## Components
+
+| File | Role |
+|------|------|
+| `voice_keyboard.py` | Main app — tabbed window (Dictation / Reading / Settings) + tray |
+| `read_aloud.py` | Reading view (also runnable standalone) |
+| `dictate.sh` | Push-to-talk dictation, for a global hotkey |
+| `speak.sh` | Read selection/clipboard aloud, for a global hotkey |
+| `SETUP.md` | Full install &amp; permission setup |
+
 ## Stack
+
 - **STT**: whisper.cpp + `ggml-small` (Greek)
 - **TTS**: Piper + `el_GR-rapunzelina-medium`
 - **Typing/paste**: ydotool (Wayland uinput)
 - **Window control**: KWin `WindowsRunner` over D-Bus
+- **Tray**: StatusNotifierItem via AppIndicator
 - **UI**: pure standard-library Tkinter (no pip dependencies)
 
 All inference is local and offline.
+
+## License
+
+See [LICENSE](LICENSE).
