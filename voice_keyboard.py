@@ -19,11 +19,14 @@ import wave
 import array
 import queue
 import signal
+import socket
 import subprocess
 import threading
 import tkinter as tk
 from tkinter import ttk
 from read_aloud import Reader
+
+CTL_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "voice.sock")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON = os.path.join(HERE, "Assets", "VoiceIcon.png")
@@ -637,6 +640,40 @@ class VoiceKeyboard:
         self.root.clipboard_append(self.text.get("1.0", "end").strip())
         self.status.config(text="📋 Αντιγράφηκε")
 
+    # ---------- control socket: global shortcuts drive THIS window ----------
+    def start_control_server(self):
+        try:
+            os.unlink(CTL_SOCK)
+        except OSError:
+            pass
+        try:
+            self._ctl = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            self._ctl.bind(CTL_SOCK)
+        except OSError:
+            return
+        threading.Thread(target=self._ctl_loop, daemon=True).start()
+
+    def _ctl_loop(self):
+        while True:
+            try:
+                data, _ = self._ctl.recvfrom(64)
+            except OSError:
+                break
+            cmd = data.decode("utf-8", "ignore").strip()
+            if cmd == "talk":
+                self.root.after(0, self.toggle)
+            elif cmd == "read":
+                self.root.after(0, self.read_clipboard)
+            elif cmd == "show":
+                self.root.after(0, self._raise)
+
+    def _raise(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(300, lambda: self.root.attributes(
+            "-topmost", bool(self.topmost_var.get())))
+
 
 # ============ settings tab (global shortcuts) ============
 _MODS = [(0x40, "Meta"), (0x4, "Ctrl"), (0x8, "Alt"), (0x1, "Shift")]
@@ -780,10 +817,12 @@ class SettingsTab:
                     f"X-KDE-Shortcuts={combo}\n")
 
     def apply(self):
+        # route through the running app so the UI reacts (mic glows, status, etc.)
+        app = os.path.join(HERE, "voice_keyboard.py")
         self._desktop("voice-shortcut-dictate", "Ομιλία",
-                      os.path.join(HERE, "dictate.sh"), self.sc_dict.get())
+                      f'{sys.executable} "{app}" talk', self.sc_dict.get())
         self._desktop("voice-shortcut-read", "Ανάγνωση",
-                      os.path.join(HERE, "speak.sh"), self.sc_read.get())
+                      f'{sys.executable} "{app}" read', self.sc_read.get())
         rebuilt = False
         for kb in ("kbuildsycoca6", "kbuildsycoca5"):
             try:
@@ -811,7 +850,22 @@ class SettingsTab:
                 continue
 
 
+def send_action(action):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.sendto(action.encode(), CTL_SOCK)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
 def main():
+    # if launched with an action and an instance is already running, hand it over
+    action = (sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in
+              ("talk", "read", "show") else None)
+    if action and send_action(action):
+        return
     if not os.path.exists(WHISPER):
         print("whisper-cli not found at", WHISPER, file=sys.stderr)
         sys.exit(1)
@@ -841,6 +895,10 @@ def main():
     style.map("TCombobox",
               fieldbackground=[("readonly", PANEL)], foreground=[("readonly", FG)],
               selectbackground=[("readonly", PANEL)], selectforeground=[("readonly", FG)])
+    # check/radio: stop white-on-white on hover/focus
+    for s in ("TCheckbutton", "TRadiobutton"):
+        style.configure(s, background=BG, foreground=FG, focuscolor=BG)
+        style.map(s, background=[("active", BG)], foreground=[("active", FG)])
     style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=[4, 6, 4, 0])
     style.configure("TNotebook.Tab", background="#21232f", foreground="#8a90a6",
                     padding=(16, 6), borderwidth=0, focuscolor=BG)
@@ -866,6 +924,26 @@ def main():
     vk = VoiceKeyboard(root, parent=tab_dict, notebook=nb, tab_read=tab_read,
                        reader=reader)
     SettingsTab(root, parent=tab_set, vk=vk)
+    vk.start_control_server()
+
+    # auto-fit window height per tab (no wasted space)
+    heights = {0: 470, 1: 520, 2: 650}
+
+    def on_tab(_=None):
+        if vk.mini:
+            return
+        try:
+            idx = nb.index(nb.select())
+        except Exception:
+            return
+        w = root.winfo_width()
+        root.geometry(f"{w if w > 100 else 560}x{heights.get(idx, 600)}")
+
+    nb.bind("<<NotebookTabChanged>>", on_tab)
+    root.after(120, on_tab)
+    if action:                       # started fresh via a shortcut → do it
+        root.after(900, lambda: vk.toggle() if action == "talk"
+                   else vk.read_clipboard())
     root.mainloop()
 
 

@@ -81,8 +81,8 @@ class Reader:
 
         # --- top toolbar: sources ---
         bar = tk.Frame(parent, bg=BG); bar.pack(fill="x", padx=12, pady=(12, 4))
-        tk.Button(bar, text="📂 Άνοιγμα PDF", command=self.open_pdf, bg=PANEL, fg=FG,
-                  relief="flat").pack(side="left")
+        tk.Button(bar, text="📂 Άνοιγμα αρχείου", command=self.open_document,
+                  bg=PANEL, fg=FG, relief="flat").pack(side="left")
         tk.Button(bar, text="📋 Επικόλληση", command=self.from_clipboard, bg=PANEL, fg=FG,
                   relief="flat").pack(side="left", padx=6)
         tk.Button(bar, text="🗑 Καθαρισμός", command=lambda: self.text.delete("1.0", "end"),
@@ -90,7 +90,7 @@ class Reader:
 
         # --- text area (select with mouse) ---
         wrap = tk.Frame(parent, bg=BG); wrap.pack(fill="both", expand=True, padx=12, pady=4)
-        self.text = tk.Text(wrap, height=8, bg=PANEL, fg=FG, insertbackground=FG,
+        self.text = tk.Text(wrap, height=6, bg=PANEL, fg=FG, insertbackground=FG,
                             relief="flat", wrap="word", font=("Sans", 12), padx=10, pady=8)
         self.text.pack(side="left", fill="both", expand=True)
         sb = tk.Scrollbar(wrap, command=self.text.yview)
@@ -132,20 +132,35 @@ class Reader:
         self.status.pack(fill="x", padx=12, pady=(0, 8))
 
     # ---------- sources ----------
-    def open_pdf(self):
+    def open_document(self):
         path = filedialog.askopenfilename(
-            title="Διάλεξε PDF", filetypes=[("PDF", "*.pdf"), ("Όλα", "*.*")])
+            title="Διάλεξε αρχείο",
+            filetypes=[("Έγγραφα", "*.pdf *.txt *.md *.docx *.odt *.doc *.rtf *.epub"),
+                       ("PDF", "*.pdf"), ("Κείμενο", "*.txt *.md"),
+                       ("Word/ODT", "*.docx *.odt *.doc *.rtf"), ("Όλα", "*.*")])
         if not path:
             return
+        ext = os.path.splitext(path)[1].lower()
+        self.status.config(text="📂 Φόρτωση…"); self.root.update_idletasks()
         try:
-            out = subprocess.run(["pdftotext", "-layout", path, "-"],
-                                 capture_output=True, text=True, timeout=60).stdout
+            text = self._extract(path, ext)
         except Exception as e:
-            self.status.config(text=f"⚠ Σφάλμα PDF: {e}"); return
+            self.status.config(text=f"⚠ Σφάλμα: {e}"); return
         self.text.delete("1.0", "end")
-        self.text.insert("1.0", out.strip())
-        self.status.config(text=f"📂 Φορτώθηκε: {os.path.basename(path)} "
-                                f"({len(out.split())} λέξεις)")
+        self.text.insert("1.0", text.strip())
+        self.status.config(text=f"📂 {os.path.basename(path)} ({len(text.split())} λέξεις)")
+
+    def _extract(self, path, ext):
+        if ext in (".txt", ".md", ""):
+            return open(path, encoding="utf-8", errors="ignore").read()
+        if ext == ".pdf":
+            return subprocess.run(["pdftotext", "-layout", path, "-"],
+                                  capture_output=True, text=True, timeout=60).stdout
+        # docx / odt / doc / rtf / epub → LibreOffice headless → txt
+        subprocess.run(["libreoffice", "--headless", "--convert-to", "txt:Text",
+                        "--outdir", "/tmp", path], capture_output=True, timeout=120)
+        base = os.path.splitext(os.path.basename(path))[0]
+        return open(f"/tmp/{base}.txt", encoding="utf-8", errors="ignore").read()
 
     def from_clipboard(self):
         txt = self._clip()
