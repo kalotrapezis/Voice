@@ -22,16 +22,23 @@ import signal
 import socket
 import subprocess
 import threading
+import urllib.request
 import tkinter as tk
 from tkinter import ttk
-from read_aloud import Reader
+from read_aloud import Reader, voice_data_dir, asset_dir, VOICES_DIR
 
 CTL_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "voice.sock")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON = os.path.join(HERE, "Assets", "VoiceIcon.png")
-MODEL = os.environ.get("WHISPER_MODEL", os.path.join(HERE, "models", "ggml-small.bin"))
+MODELS_DIR = asset_dir("models")
+MODEL = os.environ.get("WHISPER_MODEL") or os.path.join(MODELS_DIR, "ggml-small.bin")
 WHISPER = os.path.join(HERE, "whisper.cpp", "build", "bin", "whisper-cli")
+
+# first-run downloads (lean package: models fetched once into voice_data_dir)
+WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+VOICE_BASE = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+              "el/el_GR/rapunzelina")
 WAV = "/tmp/voicekbd_gui.wav"
 CONFIG_DIR = os.path.expanduser("~/.config/voicekbd")
 CONFIG = os.path.join(CONFIG_DIR, "config")
@@ -693,9 +700,17 @@ class VoiceKeyboard:
                 time.sleep(0.18)
         elif had_focus:
             # "active window" mode but WE hold focus → hide so the window we were
-            # over regains focus, otherwise Ctrl+V would paste into ourselves
+            # over regains focus, otherwise Ctrl+V would paste into ourselves.
+            # Remember geometry so re-showing keeps its place (no recentering).
+            box = {}
             ev = threading.Event()
-            self.root.after(0, lambda: (self.root.withdraw(), ev.set()))
+
+            def hide():
+                box["geo"] = self.root.geometry()
+                self.root.withdraw()
+                ev.set()
+
+            self.root.after(0, hide)
             ev.wait(1)
             time.sleep(0.3)
         else:
@@ -706,12 +721,14 @@ class VoiceKeyboard:
         except Exception:
             pass
         if not key and had_focus:                 # bring our window back afterwards
-            self.root.after(0, self._reshow_after_deliver)
+            self.root.after(0, lambda: self._reshow_after_deliver(box.get("geo")))
 
-    def _reshow_after_deliver(self):
+    def _reshow_after_deliver(self, geo=None):
         try:
-            self.root.deiconify()
-            self.root.lift()
+            if geo:
+                self.root.geometry(geo)           # restore exact position/size
+            self.root.deiconify()                 # NOTE: no lift() — we don't grab
+            # focus back, so the target keeps it and further pastes need no hiding
         except Exception:
             pass
 
@@ -1022,6 +1039,59 @@ def send_action(action):
         return False
 
 
+def ensure_assets(root):
+    """On first run (lean install) download the whisper model + Piper voices."""
+    jobs = []
+    if not os.path.exists(MODEL):
+        jobs.append((WHISPER_URL, MODEL))
+    for quality, stem in (("medium", "el_GR-rapunzelina-medium"),
+                          ("low", "el_GR-rapunzelina-low")):
+        for ext in (".onnx", ".onnx.json"):
+            dest = os.path.join(VOICES_DIR, stem + ext)
+            if not os.path.exists(dest):
+                jobs.append((f"{VOICE_BASE}/{quality}/{stem}{ext}", dest))
+    if not jobs:
+        return
+
+    dlg = tk.Toplevel(root)
+    dlg.title("Λήψη μοντέλων…")
+    dlg.configure(bg=BG)
+    dlg.geometry("440x150")
+    dlg.transient(root)
+    dlg.grab_set()
+    tk.Label(dlg, text="Πρώτη εκτέλεση — κατεβάζω τα μοντέλα φωνής (≈0.6 GB).\n"
+                       "Γίνεται μόνο μία φορά.", bg=BG, fg=FG, justify="left",
+             font=("Sans", 10)).pack(padx=16, pady=(16, 8), anchor="w")
+    info = tk.Label(dlg, text="", bg=BG, fg="#9aa0b5")
+    info.pack(padx=16, anchor="w")
+    bar = ttk.Progressbar(dlg, length=400, maximum=100)
+    bar.pack(padx=16, pady=12)
+    state = {"err": None}
+
+    def work():
+        try:
+            for i, (url, dest) in enumerate(jobs, 1):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                name = os.path.basename(dest)
+
+                def hook(blocks, bs, total, name=name, i=i):
+                    pct = (blocks * bs / total * 100) if total > 0 else 0
+                    root.after(0, lambda: (bar.config(value=pct), info.config(
+                        text=f"[{i}/{len(jobs)}]  {name}  —  {pct:0.0f}%")))
+
+                tmp = dest + ".part"
+                urllib.request.urlretrieve(url, tmp, hook)
+                os.replace(tmp, dest)
+        except Exception as e:
+            state["err"] = str(e)
+        root.after(0, dlg.destroy)
+
+    threading.Thread(target=work, daemon=True).start()
+    root.wait_window(dlg)
+    if state["err"]:
+        print("⚠ asset download failed:", state["err"], file=sys.stderr)
+
+
 def main():
     # if launched with an action and an instance is already running, hand it over
     action = (sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in
@@ -1074,6 +1144,8 @@ def main():
     # headless variant for mini mode (no tab strip)
     style.configure("Headless.TNotebook", background=BG, borderwidth=0)
     style.layout("Headless.TNotebook.Tab", [])
+
+    ensure_assets(root)          # first-run: fetch models/voices if missing
 
     nb = ttk.Notebook(root)
     tab_dict = tk.Frame(nb, bg=BG)

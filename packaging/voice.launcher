@@ -1,0 +1,6 @@
+#!/bin/sh
+# VOICE launcher — bundled whisper.cpp uses an absolute RUNPATH from the build
+# machine, so point the loader at the installed private libs instead.
+APP=/usr/lib/voice
+export LD_LIBRARY_PATH="$APP/whisper.cpp/build/src:$APP/whisper.cpp/build/ggml/src${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec python3 "$APP/voice_keyboard.py" "$@"

@@ -15,3 +15,6 @@ __pycache__/
 # Editor / OS
 *.swp
 .DS_Store
+
+# RPM build output
+build/

@@ -37,7 +37,27 @@ Runs comfortably on an 8-core CPU / 8 GB RAM machine.
 | ![Dictation panel](Screenshots/dictation.png) | ![Read-aloud panel](Screenshots/read-aloud.png) | ![Settings panel](Screenshots/settings.png) |
 | Pick where text goes, talk, live mic level, continuous mode | Read selection / clipboard / PDF, pick voice &amp; speed | Mic, global shortcuts, in-app keys |
 
-## Quick setup
+## Install (Fedora / RPM)
+
+The easiest way on Fedora KDE. `dnf` pulls every runtime dependency automatically.
+
+```bash
+# grab the .rpm from the latest release, then:
+sudo dnf install ./voice-0.0.1-1.fc44.x86_64.rpm
+```
+
+Launch **“VOICE — Φωνή”** from the app menu, or run `voice`. The speech models
+(~0.6 GB) are **not** in the package — they download once on first launch into
+`~/.local/share/voice/`.
+
+**Build the RPM yourself** (needs `whisper.cpp` built + `piper_tts/` present — see [SETUP.md](SETUP.md)):
+
+```bash
+sudo dnf install -y rpm-build patchelf
+./build_rpm.sh        # → build/rpm/RPMS/x86_64/voice-*.rpm
+```
+
+## Run from source
 
 See [SETUP.md](SETUP.md) for the full walkthrough (permissions, ydotool daemon, Piper voice). In short:
 

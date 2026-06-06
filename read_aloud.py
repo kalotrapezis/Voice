@@ -18,9 +18,24 @@ from tkinter import ttk, filedialog
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PIPER = os.path.join(HERE, "piper_tts", "piper", "piper")
+
+
+def voice_data_dir():
+    """User data dir for downloaded models/voices (~/.local/share/voice)."""
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "voice")
+
+
+def asset_dir(name):
+    """HERE/<name> for a source checkout, else the user data dir (rpm/AppImage)."""
+    local = os.path.join(HERE, name)
+    return local if os.path.isdir(local) else os.path.join(voice_data_dir(), name)
+
+
+VOICES_DIR = asset_dir("voices")
 VOICES = {
-    "Μεσαία (πιο φυσική)": os.path.join(HERE, "voices", "el_GR-rapunzelina-medium.onnx"),
-    "Χαμηλή (πιο γρήγορη)": os.path.join(HERE, "voices", "el_GR-rapunzelina-low.onnx"),
+    "Μεσαία (πιο φυσική)": os.path.join(VOICES_DIR, "el_GR-rapunzelina-medium.onnx"),
+    "Χαμηλή (πιο γρήγορη)": os.path.join(VOICES_DIR, "el_GR-rapunzelina-low.onnx"),
 }
 
 BG = "#1e1f2b"; FG = "#e6e6f0"; ACCENT = "#5b8cff"; PANEL = "#2a2c3d"

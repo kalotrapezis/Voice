@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=VOICE — Φωνή
+GenericName=Voice Keyboard & Read-Aloud
+GenericName[el]=Φωνητικό πληκτρολόγιο & ανάγνωση
+Comment=Greek dictation and read-aloud, fully offline
+Comment[el]=Ελληνική υπαγόρευση και ανάγνωση κειμένου, εντελώς τοπικά
+Exec=voice
+Icon=voice
+Terminal=false
+Categories=Utility;Accessibility;AudioVideo;
+Keywords=voice;speech;dictation;tts;stt;greek;φωνή;υπαγόρευση;
+StartupNotify=true
