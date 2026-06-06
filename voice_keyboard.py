@@ -25,6 +25,7 @@ import threading
 import urllib.request
 import tkinter as tk
 from tkinter import ttk
+from tkinter import filedialog
 from read_aloud import Reader, voice_data_dir, asset_dir, VOICES_DIR
 
 CTL_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "voice.sock")
@@ -77,6 +78,104 @@ def list_sources():
         pretty = name.replace("alsa_input.", "").replace("_", " ").replace(".", " · ")
         devices.append((name, pretty))
     return devices
+
+
+def list_monitor_sources():
+    """List `.monitor` sources — i.e. what's coming OUT of the speakers/sinks.
+    Capturing one of these records system audio (Teams/Zoom/video playback)."""
+    out = subprocess.run(["pactl", "list", "short", "sources"],
+                         capture_output=True, text=True).stdout
+    devices = []
+    for line in out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 2 or not cols[1].endswith(".monitor"):
+            continue
+        name = cols[1]
+        pretty = (name.replace(".monitor", "").replace("alsa_output.", "")
+                  .replace("_", " ").replace(".", " · "))
+        devices.append((name, pretty))
+    return devices
+
+
+def default_sink_monitor():
+    """The `.monitor` source of the current default output (where sound plays)."""
+    try:
+        sink = subprocess.run(["pactl", "get-default-sink"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+        return f"{sink}.monitor" if sink else ""
+    except Exception:
+        return ""
+
+
+def meeting_dir():
+    """Where exported meeting transcripts go (Settings → configurable; default home)."""
+    d = load_config().get("MEETING_DIR") or "~"
+    return os.path.expanduser(d)
+
+
+def transcribe(path, lang):
+    """Run whisper.cpp on a wav file and return cleaned text ('' on failure)."""
+    try:
+        res = subprocess.run(
+            [WHISPER, "-m", MODEL, "-f", path, "-l", lang, "-t", "8", "-nt", "-np"],
+            capture_output=True, text=True, timeout=120)
+        return clean_transcript(res.stdout)
+    except Exception:
+        return ""
+
+
+def run_vad_capture(proc, stop_event, on_segment, on_level=None):
+    """Read 16 kHz/mono/s16 frames from proc.stdout and split into phrases on
+    pauses (simple energy VAD). Calls on_segment(pcm_bytes) per detected phrase
+    and on_level(0..1) per frame. Shared by dictation and meeting capture."""
+    noise, calib = 200.0, []
+    in_speech, silence, speech_frames = False, 0, 0
+    seg, preroll, seen = bytearray(), [], 0
+
+    def read_frame():
+        buf = b""
+        while len(buf) < FRAME_BYTES:
+            try:
+                chunk = proc.stdout.read(FRAME_BYTES - len(buf))
+            except Exception:
+                return None
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
+    while not stop_event.is_set():
+        fb = read_frame()
+        if fb is None:
+            break
+        r = frame_rms(fb)
+        if on_level:
+            on_level(min(1.0, r / 4000.0))
+        seen += 1
+        if seen <= 13:
+            calib.append(r); noise = sum(calib) / len(calib); continue
+        thresh = max(noise * 2.5 + 120, 280)
+        if not in_speech:
+            preroll.append(fb)
+            if len(preroll) > PREROLL:
+                preroll.pop(0)
+            if r > thresh:
+                in_speech, silence, speech_frames = True, 0, 1
+                seg = bytearray(b"".join(preroll)); seg += fb
+            else:
+                noise = 0.95 * noise + 0.05 * r
+        else:
+            seg += fb
+            if r > thresh:
+                silence, speech_frames = 0, speech_frames + 1
+            else:
+                silence += 1
+                if silence >= SILENCE_HANG:
+                    if speech_frames >= MIN_SPEECH:
+                        on_segment(bytes(seg))
+                    in_speech, seg, preroll = False, bytearray(), []
+    if in_speech and speech_frames >= MIN_SPEECH:
+        on_segment(bytes(seg))
 
 
 # whisper.cpp emits non-speech annotations on silence/noise, e.g.
@@ -398,6 +497,7 @@ class VoiceKeyboard:
             r.bind_all("<Control-Key-1>", lambda e: self._go_tab(0))
             r.bind_all("<Control-Key-2>", lambda e: self._go_tab(1))
             r.bind_all("<Control-Key-3>", lambda e: self._go_tab(2))
+            r.bind_all("<Control-Key-4>", lambda e: self._go_tab(3))
         # action keys — work anywhere in the app, incl. mini mode
         r.bind_all("<F2>", lambda e: self.toggle())               # 🎤 talk
         r.bind_all("<F4>", lambda e: self.read_clipboard())       # 🔊 read
@@ -594,61 +694,17 @@ class VoiceKeyboard:
         self.draw_mic()
         self.status.config(text="⏹ Σταμάτησε")
 
-    def _read_frame(self, proc):
-        buf = b""
-        while len(buf) < FRAME_BYTES:
-            try:
-                chunk = proc.stdout.read(FRAME_BYTES - len(buf))
-            except Exception:
-                return None
-            if not chunk:
-                return None
-            buf += chunk
-        return buf
-
     def _capture_loop(self):
-        proc = self.cont_proc
-        noise, calib = 200.0, []
-        in_speech, silence, speech_frames = False, 0, 0
-        seg, preroll, seen = bytearray(), [], 0
-
         def emit(buf):
             self.seg_counter += 1
             p = f"/tmp/voicekbd_seg_{self.seg_counter}.wav"
-            write_wav(p, bytes(buf))
+            write_wav(p, buf)
             self.seg_queue.put(p)
 
-        while not self.cont_stop.is_set():
-            fb = self._read_frame(proc)
-            if fb is None:
-                break
-            r = frame_rms(fb)
-            self.live_level = min(1.0, r / 4000.0)
-            seen += 1
-            if seen <= 13:
-                calib.append(r); noise = sum(calib) / len(calib); continue
-            thresh = max(noise * 2.5 + 120, 280)
-            if not in_speech:
-                preroll.append(fb)
-                if len(preroll) > PREROLL:
-                    preroll.pop(0)
-                if r > thresh:
-                    in_speech, silence, speech_frames = True, 0, 1
-                    seg = bytearray(b"".join(preroll)); seg += fb
-                else:
-                    noise = 0.95 * noise + 0.05 * r
-            else:
-                seg += fb
-                if r > thresh:
-                    silence, speech_frames = 0, speech_frames + 1
-                else:
-                    silence += 1
-                    if silence >= SILENCE_HANG:
-                        if speech_frames >= MIN_SPEECH:
-                            emit(seg)
-                        in_speech, seg, preroll = False, bytearray(), []
-        if in_speech and speech_frames >= MIN_SPEECH:
-            emit(seg)
+        def level(v):
+            self.live_level = v
+
+        run_vad_capture(self.cont_proc, self.cont_stop, emit, level)
         self.seg_queue.put(None)
 
     def _worker_loop(self):
@@ -672,14 +728,7 @@ class VoiceKeyboard:
 
     # ---------- whisper ----------
     def _run_whisper(self, path):
-        try:
-            res = subprocess.run(
-                [WHISPER, "-m", MODEL, "-f", path, "-l", self.lang_var.get(),
-                 "-t", "8", "-nt", "-np"],
-                capture_output=True, text=True, timeout=120)
-            return clean_transcript(res.stdout)
-        except Exception:
-            return ""
+        return transcribe(path, self.lang_var.get())
 
     # ---------- delivery ----------
     def _append(self, txt):
@@ -789,6 +838,216 @@ def kde_combo(event):
     return "+".join(mods + [key])
 
 
+# ============ meeting transcription ============
+class MeetingTab:
+    """Live meeting transcription. Pick a source (system audio or microphone),
+    start, and every spoken phrase is appended with a timestamp. Runs entirely
+    in the background, so the window can be minimized or unfocused. On finish it
+    exports a Markdown file named meeting-YYYY-MM-DD-HHMMSS.md."""
+
+    LANGS = [("Ελληνικά", "el"), ("English", "en"), ("Αυτόματα", "auto")]
+
+    def __init__(self, root, parent, notebook=None):
+        self.root = root
+        self.notebook = notebook
+        parent.configure(bg=BG)
+        self.on = False
+        self.proc = None
+        self.stop = threading.Event()
+        self.worker_done = threading.Event()
+        self.seg_q = queue.Queue()
+        self.seg_n = 0
+        self.started_at = None
+        self.mode = tk.StringVar(value="system")
+        self.lang = tk.StringVar(value="el")
+        self.sources = []
+
+        tk.Label(parent, text="📝  Μεταγραφή σύσκεψης", bg=BG, fg=FG,
+                 font=("Sans", 13, "bold")).pack(anchor="w", padx=16, pady=(16, 0))
+        tk.Label(parent, text="Ξεκίνα, μίλα ή άσε τη σύσκεψη να παίξει. Στο τέλος "
+                              "αποθηκεύεται αυτόματα αρχείο .md.", bg=BG, fg="#9aa0b5",
+                 justify="left", wraplength=500).pack(anchor="w", padx=16, pady=(2, 8))
+
+        # --- source mode ---
+        ttk.Radiobutton(parent, variable=self.mode, value="system",
+                        text="🔊  Ήχος συστήματος — μόνο τα ηχεία (Teams/Zoom, βίντεο)",
+                        command=self.refresh_sources).pack(anchor="w", padx=16, pady=1)
+        ttk.Radiobutton(parent, variable=self.mode, value="mic",
+                        text="🎤  Μικρόφωνο — η φωνή σου + ο χώρος (δια ζώσης σύσκεψη)",
+                        command=self.refresh_sources).pack(anchor="w", padx=16, pady=1)
+
+        srow = tk.Frame(parent, bg=BG); srow.pack(fill="x", padx=16, pady=(6, 0))
+        self.src_box = ttk.Combobox(srow, state="readonly")
+        self.src_box.pack(side="left", fill="x", expand=True)
+        tk.Button(srow, text="⟳", command=self.refresh_sources, bg=PANEL, fg=FG,
+                  relief="flat", width=3).pack(side="left", padx=(6, 0))
+        lbl = tk.Label(srow, text="Γλώσσα", bg=BG, fg="#9aa0b5")
+        lbl.pack(side="left", padx=(10, 4))
+        self.lang_box = ttk.Combobox(srow, state="readonly", width=10,
+                                     values=[n for n, _ in self.LANGS])
+        self.lang_box.current(0)
+        self.lang_box.bind("<<ComboboxSelected>>", self._on_lang)
+        self.lang_box.pack(side="left")
+
+        crow = tk.Frame(parent, bg=BG); crow.pack(fill="x", padx=16, pady=(10, 4))
+        self.btn = tk.Button(crow, text="▶  Έναρξη", command=self.toggle, bg=ACCENT,
+                             fg="#0b1020", relief="flat", font=("Sans", 11, "bold"))
+        self.btn.pack(side="left")
+        tk.Button(crow, text="🧹 Καθαρισμός", command=self.clear, bg=PANEL, fg=FG,
+                  relief="flat").pack(side="left", padx=8)
+        self.status = tk.Label(crow, text="Έτοιμο.", bg=BG, fg="#9aa0b5", anchor="w")
+        self.status.pack(side="left", padx=8)
+
+        tbox = tk.Frame(parent, bg=BG); tbox.pack(fill="both", expand=True,
+                                                  padx=16, pady=(4, 12))
+        vsb = tk.Scrollbar(tbox)
+        vsb.pack(side="right", fill="y")
+        self.transcript = tk.Text(tbox, height=12, bg=PANEL, fg=FG, relief="flat",
+                                  wrap="word", insertbackground=FG,
+                                  yscrollcommand=vsb.set, font=("Sans", 10))
+        self.transcript.pack(side="left", fill="both", expand=True)
+        vsb.config(command=self.transcript.yview)
+
+        self.refresh_sources()
+
+    # ---------- sources ----------
+    def refresh_sources(self):
+        if self.mode.get() == "system":
+            self.sources = list_monitor_sources()
+            prefer = default_sink_monitor()
+        else:
+            self.sources = list_sources()
+            prefer = load_config().get("DEVICE", "")
+        self.src_box["values"] = [p for _, p in self.sources]
+        if self.sources:
+            names = [n for n, _ in self.sources]
+            self.src_box.current(names.index(prefer) if prefer in names else 0)
+        else:
+            self.src_box.set("")
+
+    def current_source(self):
+        i = self.src_box.current()
+        return self.sources[i][0] if 0 <= i < len(self.sources) else ""
+
+    def _on_lang(self, _=None):
+        i = self.lang_box.current()
+        self.lang.set(self.LANGS[i][1] if 0 <= i < len(self.LANGS) else "el")
+
+    # ---------- record ----------
+    def toggle(self):
+        if self.on:
+            self.stop_and_export()
+        else:
+            self.start()
+
+    def start(self):
+        dev = self.current_source()
+        if not dev:
+            self.status.config(text="⚠ Δεν βρέθηκε πηγή ήχου")
+            return
+        self.on = True
+        self.stop.clear()
+        self.worker_done.clear()
+        self.seg_n = 0
+        self.started_at = time.time()
+        while not self.seg_q.empty():
+            try:
+                self.seg_q.get_nowait()
+            except queue.Empty:
+                break
+        self.proc = subprocess.Popen(
+            ["pw-record", "--target", dev, "--rate", "16000", "--channels", "1",
+             "--format", "s16", "--raw", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        threading.Thread(target=self._capture_loop, daemon=True).start()
+        threading.Thread(target=self._worker_loop, daemon=True).start()
+        self.btn.config(text="⏹  Ολοκλήρωση & αποθήκευση", bg=GLOW_ON, fg=FG)
+        self.status.config(text="🔴 Καταγραφή… (μπορείς να ελαχιστοποιήσεις)")
+
+    def _capture_loop(self):
+        def emit(buf):
+            self.seg_n += 1
+            p = f"/tmp/voice_meet_{self.seg_n}.wav"
+            write_wav(p, buf)
+            self.seg_q.put((p, time.time()))
+        run_vad_capture(self.proc, self.stop, emit)
+        self.seg_q.put(None)
+
+    def _worker_loop(self):
+        while True:
+            item = self.seg_q.get()
+            if item is None:
+                break
+            path, ts = item
+            txt = transcribe(path, self.lang.get())
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            if txt:
+                self.root.after(0, lambda t=txt, s=ts: self._add_line(s, t))
+        self.worker_done.set()
+
+    def _add_line(self, ts, txt):
+        stamp = time.strftime("%H:%M:%S", time.localtime(ts))
+        self.transcript.insert("end", f"[{stamp}]  {txt}\n")
+        self.transcript.see("end")
+
+    def stop_and_export(self):
+        self.on = False
+        self.stop.set()
+        if self.proc:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+            self.proc = None
+        self.btn.config(state="disabled")
+        self.status.config(text="⏳ Ολοκλήρωση μεταγραφής…")
+        threading.Thread(target=self._await_and_export, daemon=True).start()
+
+    def _await_and_export(self):
+        # let any queued segments finish transcribing before we write the file
+        self.worker_done.wait(timeout=180)
+        self.root.after(0, self._export)
+
+    def _export(self):
+        self.btn.config(state="normal", text="▶  Έναρξη", bg=ACCENT, fg="#0b1020")
+        body = self.transcript.get("1.0", "end").strip()
+        if not body:
+            self.status.config(text="Τίποτα για εξαγωγή.")
+            return
+        start = self.started_at or time.time()
+        fname = "meeting-" + time.strftime("%Y-%m-%d-%H%M%S", time.localtime(start)) + ".md"
+        out_dir = meeting_dir()
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError:
+            out_dir = os.path.expanduser("~")
+        path = os.path.join(out_dir, fname)
+        src = ("Ήχος συστήματος (ηχεία)" if self.mode.get() == "system"
+               else "Μικρόφωνο")
+        dur = int(time.time() - start)
+        header = (
+            f"# Σύσκεψη — {time.strftime('%d/%m/%Y', time.localtime(start))}\n\n"
+            f"- **Έναρξη:** {time.strftime('%H:%M:%S', time.localtime(start))}\n"
+            f"- **Διάρκεια:** {dur // 60:02d}:{dur % 60:02d}\n"
+            f"- **Πηγή ήχου:** {src}\n\n---\n\n")
+        try:
+            with open(path, "w") as f:
+                f.write(header + body + "\n")
+        except OSError as e:
+            self.status.config(text=f"⚠ Αποτυχία αποθήκευσης: {e}")
+            return
+        self.status.config(text=f"✅ Αποθηκεύτηκε: {path}")
+
+    def clear(self):
+        if self.on:
+            return
+        self.transcript.delete("1.0", "end")
+        self.status.config(text="Έτοιμο.")
+
+
 class SettingsTab:
     def __init__(self, root, parent, vk=None):
         self.root = root
@@ -813,6 +1072,19 @@ class SettingsTab:
         ttk.Checkbutton(parent, text="Εμφάνιση πλαισίου κειμένου στην Υπαγόρευση",
                         variable=self.show_text, command=self.on_showtext).pack(
                         anchor="w", padx=16, pady=(10, 4))
+
+        # --- meeting export location ---
+        tk.Label(parent, text="📁  Φάκελος εξαγωγής συσκέψεων", bg=BG, fg=FG,
+                 font=("Sans", 12, "bold")).pack(anchor="w", padx=16, pady=(8, 2))
+        erow = tk.Frame(parent, bg=BG); erow.pack(fill="x", padx=16)
+        self.export_var = tk.StringVar(
+            value=self.cfg.get("MEETING_DIR") or os.path.expanduser("~"))
+        tk.Entry(erow, textvariable=self.export_var, state="readonly",
+                 readonlybackground=PANEL, fg=FG, relief="flat").pack(
+                 side="left", fill="x", expand=True)
+        tk.Button(erow, text="Επιλογή…", command=self.pick_export_dir, bg=PANEL,
+                  fg=FG, relief="flat").pack(side="left", padx=(6, 0))
+
         ttk.Separator(parent).pack(fill="x", padx=16, pady=6)
 
         tk.Label(parent, text="⌨  Συντομεύσεις (καθολικές — δουλεύουν παντού)",
@@ -865,6 +1137,15 @@ class SettingsTab:
         i = self.device_box.current()
         dev = self.devices[i][0] if 0 <= i < len(self.devices) else ""
         cfg = load_config(); cfg["DEVICE"] = dev; save_config(cfg); self.cfg = cfg
+
+    def pick_export_dir(self):
+        d = filedialog.askdirectory(initialdir=self.export_var.get() or
+                                    os.path.expanduser("~"),
+                                    title="Φάκελος εξαγωγής συσκέψεων")
+        if d:
+            self.export_var.set(d)
+            cfg = load_config(); cfg["MEETING_DIR"] = d
+            save_config(cfg); self.cfg = cfg
 
     def on_showtext(self):
         cfg = load_config()
@@ -1150,15 +1431,18 @@ def main():
     nb = ttk.Notebook(root)
     tab_dict = tk.Frame(nb, bg=BG)
     tab_read = tk.Frame(nb, bg=BG)
+    tab_meet = tk.Frame(nb, bg=BG)
     tab_set = tk.Frame(nb, bg=BG)
     nb.add(tab_dict, text="🎤  Υπαγόρευση")
     nb.add(tab_read, text="📖  Ανάγνωση")
+    nb.add(tab_meet, text="📝  Σύσκεψη")
     nb.add(tab_set, text="⚙  Ρυθμίσεις")
     nb.pack(fill="both", expand=True)
 
     reader = Reader(root, parent=tab_read)
     vk = VoiceKeyboard(root, parent=tab_dict, notebook=nb, tab_read=tab_read,
                        reader=reader)
+    MeetingTab(root, parent=tab_meet, notebook=nb)
     SettingsTab(root, parent=tab_set, vk=vk)
     vk.start_control_server()
 
@@ -1168,7 +1452,7 @@ def main():
         root.protocol("WM_DELETE_WINDOW", root.withdraw)
 
     # auto-fit window height per tab (no wasted space)
-    heights = {0: 540, 1: 560, 2: 680}
+    heights = {0: 540, 1: 560, 2: 620, 3: 680}
 
     def on_tab(_=None):
         if vk.mini:
