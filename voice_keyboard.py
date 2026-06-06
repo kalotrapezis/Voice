@@ -72,6 +72,22 @@ def list_sources():
     return devices
 
 
+# whisper.cpp emits non-speech annotations on silence/noise, e.g.
+# "[BLANK_AUDIO]", "[ Silence ]", "[ Music ]", "(clears throat)", "*laughs*".
+# These must never be typed into the user's apps — strip them before delivery.
+_NONSPEECH_RE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|[♪♫🎵]")
+
+
+def clean_transcript(text):
+    """Drop whisper's bracketed non-speech markers; return '' if nothing remains."""
+    text = _NONSPEECH_RE.sub(" ", text)
+    text = " ".join(text.split()).strip()
+    # if all that's left is stray punctuation/brackets, treat as empty
+    if not re.search(r"\w", text):
+        return ""
+    return text
+
+
 def write_wav(path, pcm_bytes):
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
@@ -167,6 +183,39 @@ def save_config(cfg):
             f.write(f"{k}={v}\n")
 
 
+# ============ scrollable container ============
+class ScrollFrame(tk.Frame):
+    """A frame whose content scrolls vertically when it doesn't fit."""
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
+        vsb = tk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=BG)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(
+            scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(
+            self._win, width=e.width))
+        self.canvas.bind("<Enter>", lambda e: self._wheel(True))
+        self.canvas.bind("<Leave>", lambda e: self._wheel(False))
+
+    def _wheel(self, on):
+        seqs = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+        if on:
+            for s in seqs:
+                self.canvas.bind_all(s, self._scroll)
+        else:
+            for s in seqs:
+                self.canvas.unbind_all(s)
+
+    def _scroll(self, e):
+        d = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+        self.canvas.yview_scroll(d, "units")
+
+
 # ============ app ============
 class VoiceKeyboard:
     def __init__(self, root, parent=None, notebook=None, tab_read=None, reader=None):
@@ -187,6 +236,8 @@ class VoiceKeyboard:
         self.seg_queue = queue.Queue()
         self.live_level = 0.0
         self.seg_counter = 0
+        self._have_focus = False        # does OUR window hold keyboard focus?
+        self.text_shown = False
 
         if self.parent is root:
             root.title("Φωνητικό Πληκτρολόγιο")
@@ -325,10 +376,13 @@ class VoiceKeyboard:
 
     # ---------- text panel toggle ----------
     def set_text_panel(self, show):
+        self.text_shown = bool(show)
         if show:
             self.text_panel.pack(fill="both", expand=True)
         else:
             self.text_panel.pack_forget()
+        if getattr(self, "_fit", None):           # grow/shrink the window to match
+            self.root.after(10, self._fit)
 
     # ---------- keyboard navigation ----------
     def setup_keys(self):
@@ -341,6 +395,14 @@ class VoiceKeyboard:
         r.bind_all("<F2>", lambda e: self.toggle())               # 🎤 talk
         r.bind_all("<F4>", lambda e: self.read_clipboard())       # 🔊 read
         r.bind_all("<Control-space>", lambda e: (self.toggle(), "break")[1])
+        # track whether the OS gives keyboard focus to our toplevel — so we can
+        # step aside before pasting into the "active window" (else we paste into us)
+        r.bind("<FocusIn>", self._track_focus, add="+")
+        r.bind("<FocusOut>", self._track_focus, add="+")
+
+    def _track_focus(self, e):
+        if e.widget is self.root:
+            self._have_focus = (e.type == tk.EventType.FocusIn)
 
     def _go_tab(self, i):
         try:
@@ -486,7 +548,8 @@ class VoiceKeyboard:
         self._append(txt)
         self.status.config(text="✓ Έτοιμο")
         if self.deliver_var.get():
-            threading.Thread(target=self.deliver, args=(txt + " ",), daemon=True).start()
+            threading.Thread(target=self.deliver, args=(txt + " ", self._have_focus),
+                             daemon=True).start()
 
     # ---------- continuous ----------
     def start_continuous(self):
@@ -597,7 +660,8 @@ class VoiceKeyboard:
     def _emit_chunk(self, txt):
         self._append(txt)
         if self.deliver_var.get():
-            threading.Thread(target=self.deliver, args=(txt + " ",), daemon=True).start()
+            threading.Thread(target=self.deliver, args=(txt + " ", self._have_focus),
+                             daemon=True).start()
 
     # ---------- whisper ----------
     def _run_whisper(self, path):
@@ -606,7 +670,7 @@ class VoiceKeyboard:
                 [WHISPER, "-m", MODEL, "-f", path, "-l", self.lang_var.get(),
                  "-t", "8", "-nt", "-np"],
                 capture_output=True, text=True, timeout=120)
-            return " ".join(res.stdout.split()).strip()
+            return clean_transcript(res.stdout)
         except Exception:
             return ""
 
@@ -615,7 +679,7 @@ class VoiceKeyboard:
         self.text.insert("end", txt + " ")
         self.text.see("end")
 
-    def deliver(self, txt):
+    def deliver(self, txt, had_focus=False):
         """Send text to the chosen target: activate window + clipboard paste."""
         key = self.target_key()
         try:
@@ -627,11 +691,27 @@ class VoiceKeyboard:
             if mid:
                 activate_window(mid)
                 time.sleep(0.18)
+        elif had_focus:
+            # "active window" mode but WE hold focus → hide so the window we were
+            # over regains focus, otherwise Ctrl+V would paste into ourselves
+            ev = threading.Event()
+            self.root.after(0, lambda: (self.root.withdraw(), ev.set()))
+            ev.wait(1)
+            time.sleep(0.3)
         else:
             time.sleep(0.35)                      # let focus settle on last window
         try:
             subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
                            timeout=10)            # Ctrl+V
+        except Exception:
+            pass
+        if not key and had_focus:                 # bring our window back afterwards
+            self.root.after(0, self._reshow_after_deliver)
+
+    def _reshow_after_deliver(self):
+        try:
+            self.root.deiconify()
+            self.root.lift()
         except Exception:
             pass
 
@@ -850,6 +930,88 @@ class SettingsTab:
                 continue
 
 
+# ============ system tray (StatusNotifierItem via AppIndicator) ============
+def start_tray(root, vk, reader):
+    """Add a KDE/SNI tray icon. Returns the GLib loop thread, or None if no SNI.
+
+    Runs GTK's main loop in a daemon thread; menu callbacks hop back to the Tk
+    thread via root.after(). The menu is exported over D-Bus (DBusMenu) and
+    rendered by Plasma, so we never draw GTK widgets ourselves.
+    """
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        try:
+            gi.require_version("AppIndicator3", "0.1")
+            from gi.repository import AppIndicator3 as AppInd
+        except (ValueError, ImportError):
+            gi.require_version("AyatanaAppIndicator3", "0.1")
+            from gi.repository import AyatanaAppIndicator3 as AppInd
+        from gi.repository import Gtk, GLib
+    except Exception:
+        return None
+
+    def ui(fn):
+        root.after(0, fn)
+
+    def quit_all():
+        try:
+            vk.cont_stop.set()
+        except Exception:
+            pass
+        for p in (getattr(vk, "rec_proc", None), getattr(vk, "cont_proc", None)):
+            try:
+                if p:
+                    p.terminate()
+            except Exception:
+                pass
+        try:
+            if reader:
+                reader.stop()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
+    def run():
+        try:
+            Gtk.init(None)
+        except Exception:
+            pass
+        ind = AppInd.Indicator.new(
+            "voice-keyboard", "VoiceIcon",
+            AppInd.IndicatorCategory.APPLICATION_STATUS)
+        ind.set_icon_theme_path(os.path.join(HERE, "Assets"))
+        ind.set_icon_full("VoiceIcon", "VOICE")
+        ind.set_title("VOICE — Φωνή")
+        ind.set_status(AppInd.IndicatorStatus.ACTIVE)
+
+        menu = Gtk.Menu()
+
+        def item(label, cb):
+            mi = Gtk.MenuItem(label=label)
+            mi.connect("activate", lambda *_: ui(cb))
+            menu.append(mi)
+            return mi
+
+        open_item = item("🪟  Άνοιγμα", vk._raise)
+        item("🎤  Ομιλία (έναρξη/λήξη)", vk.toggle)
+        item("🔊  Ανάγνωση προχείρου", vk.read_clipboard)
+        menu.append(Gtk.SeparatorMenuItem())
+        item("✖  Έξοδος", quit_all)
+        menu.show_all()
+        ind.set_menu(menu)
+        ind.set_secondary_activate_target(open_item)   # primary click → open
+        GLib.MainLoop().run()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
 def send_action(action):
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -866,14 +1028,16 @@ def main():
               ("talk", "read", "show") else None)
     if action and send_action(action):
         return
+    if not action and send_action("show"):
+        return                       # single instance: raise the existing window
     if not os.path.exists(WHISPER):
         print("whisper-cli not found at", WHISPER, file=sys.stderr)
         sys.exit(1)
     root = tk.Tk()
     root.title("VOICE — Φωνή")
     root.configure(bg=BG)
-    root.geometry("560x660")
-    root.minsize(300, 320)
+    root.geometry("560x600")
+    root.resizable(False, False)
     try:
         root._voice_icon = tk.PhotoImage(file=ICON)   # keep a ref so it's not GC'd
         root.iconphoto(True, root._voice_icon)
@@ -926,8 +1090,13 @@ def main():
     SettingsTab(root, parent=tab_set, vk=vk)
     vk.start_control_server()
 
+    # tray icon: closing the window hides to tray; "Έξοδος" truly quits
+    tray = start_tray(root, vk, reader)
+    if tray:
+        root.protocol("WM_DELETE_WINDOW", root.withdraw)
+
     # auto-fit window height per tab (no wasted space)
-    heights = {0: 470, 1: 520, 2: 650}
+    heights = {0: 540, 1: 560, 2: 680}
 
     def on_tab(_=None):
         if vk.mini:
@@ -937,11 +1106,17 @@ def main():
         except Exception:
             return
         w = root.winfo_width()
-        root.geometry(f"{w if w > 100 else 560}x{heights.get(idx, 600)}")
+        h = heights.get(idx, 600)
+        if idx == 0 and getattr(vk, "text_shown", False):
+            h += 210                       # room for the text box + copy/clear row
+        root.geometry(f"{w if w > 100 else 560}x{h}")
 
+    vk._fit = on_tab                       # let set_text_panel re-fit on toggle
     nb.bind("<<NotebookTabChanged>>", on_tab)
     root.after(120, on_tab)
     if action:                       # started fresh via a shortcut → do it
+        if action == "talk":         # show compact mic for live feedback + control
+            root.after(300, vk.toggle_mini)
         root.after(900, lambda: vk.toggle() if action == "talk"
                    else vk.read_clipboard())
     root.mainloop()
