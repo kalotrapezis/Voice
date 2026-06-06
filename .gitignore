@@ -1,0 +1,17 @@
+# Downloaded models / binaries (large — fetched by setup, not versioned)
+models/
+voices/
+whisper.cpp/
+piper_tts/
+
+# Generated audio / runtime
+*.wav
+*.pcm
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+*.swp
+.DS_Store
