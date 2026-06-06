@@ -124,7 +124,7 @@ class Reader:
         vb.pack(side="left", padx=6)
         vb.bind("<<ComboboxSelected>>", self.on_voice)
         tk.Label(opt, text="  Ρυθμός:", bg=BG, fg=FG).pack(side="left")
-        self.speed_scale = ttk.Scale(opt, from_=0.8, to=1.4, value=1.0,
+        self.speed_scale = ttk.Scale(opt, from_=0.7, to=1.6, value=1.0,
                                      command=self.on_speed, length=130)
         self.speed_scale.pack(side="left")
         self.speed_lbl = tk.Label(opt, text="1.00×", bg=BG, fg="#9aa0b5", width=6)
@@ -229,8 +229,11 @@ class Reader:
             if self.stop_flag.is_set():
                 break
             try:
+                # Piper's length_scale is inverse to speed (bigger = slower), so
+                # convert the user-facing rate (1.4× = faster) accordingly
+                length_scale = round(1.0 / self.speed, 3)
                 subprocess.run([PIPER, "--model", self.model, "--length_scale",
-                                str(self.speed), "--sentence_silence", "0.3",
+                                str(length_scale), "--sentence_silence", "0.3",
                                 "--output_file", raw], input=part.encode(),
                                capture_output=True, timeout=60)
                 pad_wav(raw, pwav)
