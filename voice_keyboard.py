@@ -26,6 +26,7 @@ from tkinter import ttk
 from read_aloud import Reader
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ICON = os.path.join(HERE, "Assets", "VoiceIcon.png")
 MODEL = os.environ.get("WHISPER_MODEL", os.path.join(HERE, "models", "ggml-small.bin"))
 WHISPER = os.path.join(HERE, "whisper.cpp", "build", "bin", "whisper-cli")
 WAV = "/tmp/voicekbd_gui.wav"
@@ -815,10 +816,15 @@ def main():
         print("whisper-cli not found at", WHISPER, file=sys.stderr)
         sys.exit(1)
     root = tk.Tk()
-    root.title("Φωνή — Υπαγόρευση & Ανάγνωση")
+    root.title("VOICE — Φωνή")
     root.configure(bg=BG)
     root.geometry("560x660")
     root.minsize(300, 320)
+    try:
+        root._voice_icon = tk.PhotoImage(file=ICON)   # keep a ref so it's not GC'd
+        root.iconphoto(True, root._voice_icon)
+    except Exception:
+        pass
 
     # dropdown popup lists don't inherit the ttk theme — fix contrast here
     root.option_add("*TCombobox*Listbox.background", PANEL)

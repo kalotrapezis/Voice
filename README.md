@@ -1,4 +1,10 @@
-# Φωνή — Greek Voice Keyboard & Read-Aloud (Linux / Wayland / KDE)
+<p align="center">
+  <img src="Assets/VoiceIcon.png" width="140" alt="VOICE">
+</p>
+
+# VOICE — Greek Voice Keyboard & Read-Aloud (Linux / Wayland / KDE)
+
+**V.O.I.C.E** — *Voice On-device Intelligent Control Environment.*
 
 A fully **local, offline** Greek voice toolkit for Linux — no GPU, no cloud.
 Built as the base for an accessibility tool: talk to type, and have any text read back.
