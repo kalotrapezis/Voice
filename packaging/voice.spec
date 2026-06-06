@@ -7,7 +7,7 @@
 %global __requires_exclude ^(libwhisper|libggml.*|libpiper_phonemize|libonnxruntime|libespeak-ng)\\.so.*$
 
 Name:           voice
-Version:        0.0.1
+Version:        0.0.2
 Release:        1%{?dist}
 Summary:        Greek voice keyboard & read-aloud (offline STT/TTS) for KDE Wayland
 
@@ -96,5 +96,10 @@ install -Dm644 %{projdir}/LICENSE \
 /usr/bin/update-desktop-database &>/dev/null || :
 
 %changelog
+* Sat Jun 06 2026 Theologos Kalotrapezis <kalotrapezis@gmail.com> - 0.0.2-1
+- Add Meeting transcription tab: capture system audio or mic, live timestamped
+  transcript, export to Markdown (meeting-YYYY-MM-DD-HHMMSS.md)
+- Settings: configurable meeting export folder
+
 * Sat Jun 06 2026 Theologos Kalotrapezis <kalotrapezis@gmail.com> - 0.0.1-1
 - Initial RPM packaging of VOICE
