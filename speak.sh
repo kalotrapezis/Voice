@@ -32,8 +32,21 @@ if [ "$#" -gt 0 ]; then
 elif [ ! -t 0 ]; then
   TEXT="$(cat)"
 else
-  TEXT="$(wl-paste --primary 2>/dev/null || true)"
-  [ -z "${TEXT// }" ] && TEXT="$(wl-paste 2>/dev/null || true)"
+  # read the highlighted (PRIMARY) selection, then the clipboard — using
+  # whatever clipboard tool the session has (Wayland: wl-paste, X11: xclip/xsel)
+  clip_get() { # $1 = primary|clipboard
+    if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-paste >/dev/null 2>&1; then
+      [ "$1" = primary ] && wl-paste --primary 2>/dev/null || wl-paste 2>/dev/null
+    elif command -v xclip >/dev/null 2>&1; then
+      xclip -selection "$1" -o 2>/dev/null
+    elif command -v xsel >/dev/null 2>&1; then
+      [ "$1" = primary ] && xsel --primary --output 2>/dev/null || xsel --clipboard --output 2>/dev/null
+    elif command -v wl-paste >/dev/null 2>&1; then
+      [ "$1" = primary ] && wl-paste --primary 2>/dev/null || wl-paste 2>/dev/null
+    fi
+  }
+  TEXT="$(clip_get primary || true)"
+  [ -z "${TEXT// }" ] && TEXT="$(clip_get clipboard || true)"
 fi
 
 if [ -z "${TEXT// }" ]; then

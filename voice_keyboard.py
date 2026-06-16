@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Φωνητικό Πληκτρολόγιο — Greek voice keyboard / voice remote for KDE Wayland.
+Φωνητικό Πληκτρολόγιο — Greek voice keyboard / voice remote for Linux.
 
 Pick a microphone and a target app, then talk. In continuous mode it transcribes
 on each pause and delivers the text straight into the chosen app window
 (activate + clipboard paste, so Greek works reliably). Has an always-on-top
 mini mode so it can float as a small mic over whatever you're doing.
 
-Engines: whisper.cpp (local CPU build) + ydotool (paste) + KWin WindowsRunner
-(window activation over D-Bus). Pure standard-library Tkinter — no pip deps.
+Engines: whisper.cpp (local CPU build) + Piper (TTS). Typing/paste, clipboard
+and window activation are abstracted in platform_io: KWin WindowsRunner + ydotool
++ wl-clipboard on KDE Plasma, wmctrl + xdotool + xclip on Cinnamon / other X11
+desktops, chosen at runtime. Pure standard-library Tkinter — no pip deps.
 """
 import os
 import re
@@ -20,6 +22,7 @@ import array
 import queue
 import signal
 import socket
+import shutil
 import subprocess
 import threading
 import urllib.request
@@ -27,6 +30,9 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import filedialog
 from read_aloud import Reader, voice_data_dir, asset_dir, VOICES_DIR
+import platform_io
+from platform_io import list_windows, activate_target, clip_copy, send_paste
+import clipboard as clipmod
 
 CTL_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "voice.sock")
 
@@ -61,8 +67,6 @@ GLOW_IDLE = "#3a3d52"
 PANEL = "#2a2c3d"
 
 LAST_ACTIVE = "🎯 Ενεργό παράθυρο (αυτό με focus)"
-KWIN = ["gdbus", "call", "--session", "--dest", "org.kde.KWin",
-        "--object-path", "/WindowsRunner", "--method"]
 
 
 # ============ audio / device helpers ============
@@ -227,45 +231,8 @@ def rms_level(path):
         return 0.0
 
 
-# ============ KWin window helpers ============
-_WIN_RE = re.compile(r"\('(0_\{[^}]+\})',\s*'((?:[^'\\]|\\.)*)',\s*'((?:[^'\\]|\\.)*)'")
-
-
-def list_windows():
-    """Return [(appclass, 'title — appclass'), ...] of open windows."""
-    try:
-        out = subprocess.run(KWIN + ["org.kde.krunner1.Match", ""],
-                             capture_output=True, text=True, timeout=4).stdout
-    except Exception:
-        return []
-    wins, seen = [], set()
-    SKIP = {"xwaylandvideobridge", "plasmashell"}
-    for mid, title, appcls in _WIN_RE.findall(out):
-        title = title.replace("\\'", "'")
-        if appcls in SKIP or appcls in seen:
-            continue
-        seen.add(appcls)
-        wins.append((appcls, f"{title}  ·  {appcls}"))
-    return wins
-
-
-def resolve_window(appclass):
-    """Get a live match-id for an app-class (ids change every session)."""
-    try:
-        out = subprocess.run(KWIN + ["org.kde.krunner1.Match", appclass],
-                             capture_output=True, text=True, timeout=4).stdout
-    except Exception:
-        return None
-    for mid, _title, appcls in _WIN_RE.findall(out):
-        if appcls == appclass:
-            return mid
-    m = re.search(r"0_\{[^}]+\}", out)
-    return m.group(0) if m else None
-
-
-def activate_window(match_id):
-    subprocess.run(KWIN + ["org.kde.krunner1.Run", match_id, ""],
-                   capture_output=True, timeout=4)
+# Window enumeration / activation lives in platform_io (KWin on Plasma, wmctrl
+# on X11 desktops like Cinnamon). Imported up top as list_windows / activate_target.
 
 
 # ============ config ============
@@ -442,6 +409,34 @@ class VoiceKeyboard:
                                      font=("Sans", 10), takefocus=0)
         self.mini_expand.pack(side="left", fill="y", padx=(2, 3), pady=3)
 
+        # full-width clipboard toggle, sits as its own row UNDER the mic/speaker bar
+        self.mini_clip_btn = tk.Button(self.parent, text="📋  Πρόχειρο ▾",
+                                       command=self.toggle_mini_clip, bg=PANEL,
+                                       fg=FG, relief="flat", font=("Sans", 10),
+                                       takefocus=0)
+
+        # ---------- MINI CLIPBOARD PANEL — 5 items visible, scrollable ----------
+        # Hangs under the clipboard toggle; opened by it or the clip shortcut.
+        # Built lazily (reads self.clip_store, which main sets after construction).
+        self.mini_clip_open = False
+        self._mini_listener_added = False
+        self._mini_imgs = []
+        self.mini_clip = tk.Frame(self.parent, bg=BG)
+        self._mini_canvas = tk.Canvas(self.mini_clip, bg=BG, highlightthickness=0,
+                                      height=5 * 30)
+        self._mini_vsb = ttk.Scrollbar(self.mini_clip, orient="vertical",
+                                       command=self._mini_canvas.yview)
+        self._mini_canvas.configure(yscrollcommand=self._mini_vsb.set)
+        self._mini_vsb.pack(side="right", fill="y")
+        self._mini_canvas.pack(side="left", fill="both", expand=True)
+        self._mini_inner = tk.Frame(self._mini_canvas, bg=BG)
+        self._mini_cwin = self._mini_canvas.create_window(
+            (0, 0), window=self._mini_inner, anchor="nw")
+        self._mini_inner.bind("<Configure>", lambda e: self._mini_canvas.configure(
+            scrollregion=self._mini_canvas.bbox("all")))
+        self._mini_canvas.bind("<Configure>", lambda e: self._mini_canvas.itemconfig(
+            self._mini_cwin, width=e.width))
+
         self.refresh_windows()
         self.apply_topmost()
         self.set_text_panel(self.cfg.get("SHOW_TEXT", "0") == "1")
@@ -531,7 +526,8 @@ class VoiceKeyboard:
             self.header.pack_forget()
             self.mic_area.pack_forget()
             self.controls.pack_forget()
-            self.mini_bar.pack(fill="both", expand=True)
+            self.mini_bar.pack(fill="x")
+            self.mini_clip_btn.pack(fill="x", padx=3, pady=(0, 3))
             self.topmost_var.set(True); self.apply_topmost()
             if self.notebook is not None:
                 self.notebook.select(self.parent)            # show dictation
@@ -539,8 +535,10 @@ class VoiceKeyboard:
                     self.notebook.hide(self.tab_read)        # drop reading tab
                 self.notebook.configure(style="Headless.TNotebook")  # hide tab strip
             self.root.minsize(120, 48)                       # allow it to be tiny
-            self.root.geometry("190x60")
+            self.root.geometry("190x96")                     # mic row + clip toggle
         else:
+            self._mini_clip_close()
+            self.mini_clip_btn.pack_forget()
             self.mini_bar.pack_forget()
             self.mini_btn.config(text="🔽 mini")
             self.mic_area.pack(fill="x", padx=16)
@@ -553,6 +551,105 @@ class VoiceKeyboard:
             self.root.minsize(300, 320)
             self.root.geometry("560x660")
         self.draw_mic()
+
+    # ---------- mini clipboard panel ----------
+    def toggle_mini_clip(self, show=None):
+        """Show/hide the 5-item clipboard list under the mini bar. Entering it
+        also drops the app into mini mode if it wasn't already."""
+        want = (not self.mini_clip_open) if show is None else bool(show)
+        if want:
+            if not self.mini:
+                self.toggle_mini()                 # sets 190x60; we resize below
+            self.mini_clip_open = True
+            self._build_mini_clip()
+            self.mini_clip.pack(fill="both", expand=True, after=self.mini_clip_btn)
+            self.mini_clip_btn.config(bg=ACCENT, fg="#0b1020", text="📋  Πρόχειρο ▴")
+            self.root.minsize(120, 48)
+            self.root.geometry("250x250")
+            store = getattr(self, "clip_store", None)
+            if store is not None and not self._mini_listener_added:
+                store.add_listener(self._mini_refresh)
+                self._mini_listener_added = True
+        else:
+            self._mini_clip_close()
+            if self.mini:
+                self.root.geometry("190x96")
+
+    def _mini_clip_close(self):
+        self.mini_clip_open = False
+        try:
+            self.mini_clip.pack_forget()
+            self.mini_clip_btn.config(bg=PANEL, fg=FG, text="📋  Πρόχειρο ▾")
+        except Exception:
+            pass
+        store = getattr(self, "clip_store", None)
+        if store is not None and self._mini_listener_added:
+            store.remove_listener(self._mini_refresh)
+            self._mini_listener_added = False
+
+    def _mini_refresh(self):
+        # store listeners fire on the watcher thread → marshal to Tk
+        self.root.after(0, self._build_mini_clip)
+
+    def _build_mini_clip(self):
+        if not self.mini_clip_open:
+            return
+        for w in self._mini_inner.winfo_children():
+            w.destroy()
+        self._mini_imgs.clear()
+        store = getattr(self, "clip_store", None)
+        items = store.ordered() if store else []
+        if not items:
+            tk.Label(self._mini_inner, text="(κενό)", bg=BG, fg="#6b7088").pack(pady=12)
+            return
+        for it in items:                       # all items; 5 fit, rest scroll
+            self._mini_clip_row(it)
+        self._bind_mini_wheel(self._mini_inner)
+
+    def _mini_clip_row(self, it):
+        row = tk.Frame(self._mini_inner, bg=PANEL)
+        row.pack(fill="x", pady=1, padx=1)
+        if it.get("kind") == "image":
+            txt = "🖼 " + os.path.basename(it.get("path", ""))
+        else:
+            txt = " ".join(it.get("text", "").split())
+        if len(txt) > 40:
+            txt = txt[:40] + "…"
+        lbl = tk.Label(row, text=txt or "(κενό)", bg=PANEL, fg=FG, anchor="w",
+                       cursor="hand2", font=("Sans", 9))
+        lbl.pack(side="left", fill="x", expand=True, padx=6, pady=4)
+        lbl.bind("<Button-1>", lambda e, i=it: self._mini_clip_pick(i))
+        pinned = it.get("pinned")
+        tk.Button(row, text=("📌" if pinned else "📍"), relief="flat", bd=0,
+                  font=("Sans", 9), bg=(ACCENT if pinned else PANEL),
+                  fg=("#0b1020" if pinned else "#9aa0b5"),
+                  command=lambda i=it: self.clip_store.set_pinned(
+                      i["id"], not i.get("pinned"))).pack(side="right", padx=1)
+
+    def _mini_clip_pick(self, it):
+        clipmod.recopy(it)
+        self.toggle_mini_clip(False)           # copied → collapse so you can paste
+
+    def _bind_mini_wheel(self, widget):
+        def wheel(e):
+            self._mini_canvas.yview_scroll(-1 if e.num == 4 else 1, "units")
+        for w in [widget] + list(self._descendants(widget)):
+            w.bind("<Button-4>", wheel)
+            w.bind("<Button-5>", wheel)
+
+    @staticmethod
+    def _descendants(w):
+        for c in w.winfo_children():
+            yield c
+            yield from VoiceKeyboard._descendants(c)
+
+    def show_clip_mini(self):
+        """Clip shortcut: toggle the always-on-top mini clipboard view."""
+        if self.mini_clip_open:
+            self.toggle_mini_clip(False)
+        else:
+            self._raise()
+            self.toggle_mini_clip(True)
 
     def read_clipboard(self):
         """Mini speaker button: speak clipboard (Ctrl+C'd text), or stop if speaking."""
@@ -738,14 +835,9 @@ class VoiceKeyboard:
     def deliver(self, txt, had_focus=False):
         """Send text to the chosen target: activate window + clipboard paste."""
         key = self.target_key()
-        try:
-            subprocess.run(["wl-copy"], input=txt.encode(), timeout=5)
-        except Exception:
-            pass
+        clip_copy(txt)
         if key:                                   # specific app window
-            mid = resolve_window(key)
-            if mid:
-                activate_window(mid)
+            if activate_target(key):
                 time.sleep(0.18)
         elif had_focus:
             # "active window" mode but WE hold focus → hide so the window we were
@@ -764,11 +856,7 @@ class VoiceKeyboard:
             time.sleep(0.3)
         else:
             time.sleep(0.35)                      # let focus settle on last window
-        try:
-            subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
-                           timeout=10)            # Ctrl+V
-        except Exception:
-            pass
+        send_paste()                              # Ctrl+V (ydotool / xdotool)
         if not key and had_focus:                 # bring our window back afterwards
             self.root.after(0, lambda: self._reshow_after_deliver(box.get("geo")))
 
@@ -812,6 +900,10 @@ class VoiceKeyboard:
                 self.root.after(0, self.read_clipboard)
             elif cmd == "show":
                 self.root.after(0, self._raise)
+            elif cmd == "clip":
+                self.root.after(0, self.show_clipboard)
+            elif cmd == "clipmini":
+                self.root.after(0, self.show_clip_mini)
 
     def _raise(self):
         self.root.deiconify()
@@ -819,6 +911,17 @@ class VoiceKeyboard:
         self.root.attributes("-topmost", True)
         self.root.after(300, lambda: self.root.attributes(
             "-topmost", bool(self.topmost_var.get())))
+
+    def show_clipboard(self):
+        """Raise the window on the clipboard tab — the Win+V-style quick view."""
+        if getattr(self, "mini", False):
+            self.toggle_mini()
+        self._raise()
+        try:
+            if self.notebook is not None and getattr(self, "tab_clip", None):
+                self.notebook.select(self.tab_clip)
+        except Exception:
+            pass
 
 
 # ============ settings tab (global shortcuts) ============
@@ -836,6 +939,82 @@ def kde_combo(event):
     if len(key) == 1:
         key = key.upper()
     return "+".join(mods + [key])
+
+
+# ---- Cinnamon / GTK global-shortcut registration (X11 desktops) ----
+_GTK_MOD = {"Ctrl": "<Control>", "Alt": "<Alt>", "Shift": "<Shift>", "Meta": "<Super>"}
+
+
+def gtk_accel(combo):
+    """Convert a KDE combo ('Ctrl+Shift+Z') to a GTK accelerator
+    ('<Control><Shift>z') as used by Cinnamon/GNOME custom keybindings."""
+    *mods, key = combo.split("+")
+    if len(key) == 1:
+        key = key.lower()
+    return "".join(_GTK_MOD.get(m, "") for m in mods) + key
+
+
+def cinnamon_register(specs):
+    """Register custom keybindings under org.cinnamon.desktop.keybindings via
+    gsettings. specs = [(slug, name, command, combo|''), ...]. A slug with an
+    empty combo is removed. Returns True if gsettings was driven successfully."""
+    import ast
+    BASE = "org.cinnamon.desktop.keybindings"
+    PATH = "/org/cinnamon/desktop/keybindings/custom-keybindings"
+    CHILD = "org.cinnamon.desktop.keybindings.custom-keybinding"
+
+    def get_list():
+        try:
+            out = subprocess.run(["gsettings", "get", BASE, "custom-list"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+            val = ast.literal_eval(out)
+            return [s for s in val if s != "__dummy__"]
+        except Exception:
+            return []
+
+    def slot_command(slot):
+        try:
+            out = subprocess.run(["gsettings", "get", f"{CHILD}:{PATH}/{slot}/",
+                                  "command"], capture_output=True, text=True,
+                                 timeout=5).stdout.strip()
+            return ast.literal_eval(out)
+        except Exception:
+            return ""
+
+    try:
+        clist = get_list()
+        # map command → existing slot, so re-applying updates the same entry
+        by_cmd = {slot_command(s): s for s in clist}
+        next_n = 0
+
+        def free_slot():
+            nonlocal next_n
+            while f"custom{next_n}" in clist:
+                next_n += 1
+            slot = f"custom{next_n}"
+            next_n += 1
+            return slot
+
+        for slug, name, command, combo in specs:
+            slot = by_cmd.get(command)
+            if not combo:
+                if slot and slot in clist:
+                    clist.remove(slot)
+                continue
+            if not slot:
+                slot = free_slot()
+                if slot not in clist:
+                    clist.append(slot)
+            p = f"{CHILD}:{PATH}/{slot}/"
+            subprocess.run(["gsettings", "set", p, "name", name], timeout=5)
+            subprocess.run(["gsettings", "set", p, "command", command], timeout=5)
+            subprocess.run(["gsettings", "set", p, "binding",
+                            f"['{gtk_accel(combo)}']"], timeout=5)
+        listv = "[" + ", ".join(f"'{s}'" for s in clist) + "]" if clist else "@as []"
+        subprocess.run(["gsettings", "set", BASE, "custom-list", listv], timeout=5)
+        return True
+    except Exception:
+        return False
 
 
 # ============ meeting transcription ============
@@ -1095,14 +1274,18 @@ class SettingsTab:
 
         self.sc_dict = tk.StringVar(value=self.cfg.get("SC_DICT", "Meta+Z"))
         self.sc_read = tk.StringVar(value=self.cfg.get("SC_READ", "Meta+R"))
+        self.sc_clip = tk.StringVar(value=self.cfg.get("SC_CLIP", "Meta+V"))
+        self.sc_clipmini = tk.StringVar(value=self.cfg.get("SC_CLIPMINI", "Ctrl+Alt+Z"))
         self._row(parent, "🎤  Ομιλία (έναρξη/λήξη υπαγόρευσης)", self.sc_dict)
         self._row(parent, "🔊  Ανάγνωση επιλογής / προχείρου", self.sc_read)
+        self._row(parent, "📋  Πρόχειρο — πλήρης καρτέλα", self.sc_clip)
+        self._row(parent, "📋  Πρόχειρο — mini (πάνω από όλα)", self.sc_clipmini)
 
         btns = tk.Frame(parent, bg=BG); btns.pack(fill="x", padx=16, pady=14)
         tk.Button(btns, text="💾 Αποθήκευση & Ενεργοποίηση", command=self.apply,
                   bg=ACCENT, fg="#0b1020", relief="flat",
                   font=("Sans", 11, "bold")).pack(side="left")
-        tk.Button(btns, text="Άνοιγμα ρυθμίσεων KDE", command=self.open_kde,
+        tk.Button(btns, text="Άνοιγμα ρυθμίσεων πληκτρολογίου", command=self.open_kde,
                   bg=PANEL, fg=FG, relief="flat").pack(side="left", padx=8)
 
         self.status = tk.Label(parent, text="", bg=BG, fg="#9aa0b5",
@@ -1197,30 +1380,58 @@ class SettingsTab:
     def apply(self):
         # route through the running app so the UI reacts (mic glows, status, etc.)
         app = os.path.join(HERE, "voice_keyboard.py")
-        self._desktop("voice-shortcut-dictate", "Ομιλία",
-                      f'{sys.executable} "{app}" talk', self.sc_dict.get())
-        self._desktop("voice-shortcut-read", "Ανάγνωση",
-                      f'{sys.executable} "{app}" read', self.sc_read.get())
-        rebuilt = False
-        for kb in ("kbuildsycoca6", "kbuildsycoca5"):
-            try:
-                subprocess.run([kb], capture_output=True, timeout=20)
-                rebuilt = True
-                break
-            except FileNotFoundError:
-                continue
-            except Exception:
-                break
+        dict_cmd = f'{sys.executable} "{app}" talk'
+        read_cmd = f'{sys.executable} "{app}" read'
+        clip_cmd = f'{sys.executable} "{app}" clip'
+        clipmini_cmd = f'{sys.executable} "{app}" clipmini'
+        msg = ""
+        if platform_io.IS_KDE:
+            # KDE Plasma: .desktop entries with X-KDE-Shortcuts + rebuild cache
+            self._desktop("voice-shortcut-dictate", "Ομιλία", dict_cmd, self.sc_dict.get())
+            self._desktop("voice-shortcut-read", "Ανάγνωση", read_cmd, self.sc_read.get())
+            self._desktop("voice-shortcut-clip", "Πρόχειρο", clip_cmd, self.sc_clip.get())
+            self._desktop("voice-shortcut-clipmini", "Πρόχειρο mini", clipmini_cmd,
+                          self.sc_clipmini.get())
+            rebuilt = False
+            for kb in ("kbuildsycoca6", "kbuildsycoca5"):
+                try:
+                    subprocess.run([kb], capture_output=True, timeout=20)
+                    rebuilt = True
+                    break
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    break
+            msg = ("Δοκίμασε τις συντομεύσεις." if rebuilt else
+                   "Αν δεν δουλεύουν, κάνε αποσύνδεση/σύνδεση ή όρισέ τες από τις ρυθμίσεις KDE.")
+        elif shutil.which("gsettings") and ("cinnamon" in platform_io.DESKTOP
+                                            or "gnome" in platform_io.DESKTOP):
+            # Cinnamon (Linux Mint) / GNOME: custom keybindings via gsettings
+            ok = cinnamon_register([
+                ("voice-dictate", "Φωνή — Ομιλία", dict_cmd, self.sc_dict.get()),
+                ("voice-read", "Φωνή — Ανάγνωση", read_cmd, self.sc_read.get()),
+                ("voice-clip", "Φωνή — Πρόχειρο", clip_cmd, self.sc_clip.get()),
+                ("voice-clipmini", "Φωνή — Πρόχειρο mini", clipmini_cmd,
+                 self.sc_clipmini.get()),
+            ])
+            msg = ("Δοκίμασε τις συντομεύσεις." if ok else
+                   "Δεν μπόρεσα να τις ορίσω αυτόματα — όρισέ τες από τις Ρυθμίσεις "
+                   "συστήματος → Πληκτρολόγιο → Συντομεύσεις.")
+        else:
+            msg = ("Όρισε τις συντομεύσεις χειροκίνητα από τις ρυθμίσεις του "
+                   "περιβάλλοντος εργασίας (εντολές: «… talk» και «… read»).")
         cfg = load_config()
-        cfg.update(SC_DICT=self.sc_dict.get(), SC_READ=self.sc_read.get())
+        cfg.update(SC_DICT=self.sc_dict.get(), SC_READ=self.sc_read.get(),
+                   SC_CLIP=self.sc_clip.get(), SC_CLIPMINI=self.sc_clipmini.get())
         save_config(cfg); self.cfg = cfg
-        self.status.config(text="✅ Αποθηκεύτηκαν. " + (
-            "Δοκίμασε τις συντομεύσεις." if rebuilt else
-            "Αν δεν δουλεύουν, κάνε αποσύνδεση/σύνδεση ή όρισέ τες από τις ρυθμίσεις KDE."))
+        self.status.config(text="✅ Αποθηκεύτηκαν. " + msg)
 
     def open_kde(self):
+        # Open the desktop's keyboard-shortcut settings (KDE, Cinnamon, GNOME)
         for cmd in (["kcmshell6", "kcm_keys"], ["systemsettings", "kcm_keys"],
-                    ["kcmshell5", "khotkeys"]):
+                    ["kcmshell5", "khotkeys"],
+                    ["cinnamon-settings", "keyboard"],
+                    ["gnome-control-center", "keyboard"]):
             try:
                 subprocess.Popen(cmd)
                 return
@@ -1228,13 +1439,138 @@ class SettingsTab:
                 continue
 
 
+# ============ clipboard history tab ============
+class ClipboardTab:
+    """Browse/re-copy clipboard history. Text rows show a preview + case-copy
+    options (lower/UPPER/Title); image rows show a thumbnail + path. Each row can
+    be pinned (survives reboots) or deleted; a header button clears the rest."""
+
+    PREVIEW_CHARS = 110
+
+    def __init__(self, root, parent, store):
+        self.root = root
+        self.store = store
+        self._imgs = []                    # keep PhotoImage refs alive
+        parent.configure(bg=BG)
+
+        head = tk.Frame(parent, bg=BG)
+        head.pack(fill="x", padx=12, pady=(12, 4))
+        tk.Label(head, text="📋  Πρόχειρο — ιστορικό", bg=BG, fg=FG,
+                 font=("Sans", 13, "bold")).pack(side="left")
+        tk.Button(head, text="🧹 Καθαρισμός", command=self._clear, bg=PANEL, fg=FG,
+                  relief="flat").pack(side="right")
+        self.count = tk.Label(head, text="", bg=BG, fg="#9aa0b5")
+        self.count.pack(side="right", padx=8)
+
+        self.status = tk.Label(parent, text="Αντίγραψε οτιδήποτε — θα εμφανιστεί εδώ. "
+                               "Καρφίτσωσε ό,τι θες να μείνει.", bg=BG, fg="#9aa0b5")
+        self.status.pack(anchor="w", padx=14, pady=(0, 6))
+
+        # scrollable list
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=BG)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(
+            scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(
+            self._win, width=e.width))
+        for seq in ("<Button-4>", "<Button-5>"):
+            self.canvas.bind_all(seq, self._wheel)
+
+        self.refresh()
+
+    def _wheel(self, e):
+        # only scroll when the pointer is over our list (bind_all is global)
+        if self.canvas.winfo_containing(e.x_root, e.y_root) is None:
+            return
+        self.canvas.yview_scroll(-1 if e.num == 4 else 1, "units")
+
+    def _flash(self, msg):
+        self.status.config(text=msg, fg=ACCENT)
+        self.root.after(1400, lambda: self.status.config(fg="#9aa0b5"))
+
+    def _copy(self, item, transform=None):
+        if transform and item.get("kind") == "text":
+            clip_copy(transform(item["text"]))
+        else:
+            clipmod.recopy(item)
+        self._flash("✓ Αντιγράφηκε στο πρόχειρο")
+
+    def _clear(self):
+        self.store.clear()
+        self._flash("🧹 Καθαρίστηκε (τα καρφιτσωμένα έμειναν)")
+
+    def refresh(self):
+        for w in self.inner.winfo_children():
+            w.destroy()
+        self._imgs.clear()
+        items = self.store.ordered()
+        self.count.config(text=f"{len(items)} στοιχεία")
+        if not items:
+            tk.Label(self.inner, text="(κενό)", bg=BG, fg="#6b7088").pack(pady=20)
+            return
+        for it in items:
+            self._row(it)
+
+    def _row(self, it):
+        row = tk.Frame(self.inner, bg=PANEL)
+        row.pack(fill="x", pady=3, padx=2)
+        pinned = it.get("pinned")
+
+        # thumbnail (images) or a small kind glyph
+        if it.get("kind") == "image" and it.get("thumb") and os.path.exists(it["thumb"]):
+            try:
+                img = tk.PhotoImage(file=it["thumb"])
+                self._imgs.append(img)
+                tk.Label(row, image=img, bg=PANEL).pack(side="left", padx=6, pady=4)
+            except Exception:
+                tk.Label(row, text="🖼", bg=PANEL, fg=FG).pack(side="left", padx=8)
+
+        # preview text (click to re-copy)
+        if it.get("kind") == "image":
+            preview = it.get("path", it.get("text", ""))
+        else:
+            preview = " ".join(it.get("text", "").split())
+        if len(preview) > self.PREVIEW_CHARS:
+            preview = preview[:self.PREVIEW_CHARS] + "…"
+        lbl = tk.Label(row, text=preview or "(κενό)", bg=PANEL, fg=FG, justify="left",
+                       anchor="w", wraplength=300, cursor="hand2")
+        lbl.pack(side="left", fill="x", expand=True, padx=6, pady=6)
+        lbl.bind("<Button-1>", lambda e, i=it: self._copy(i))
+
+        # actions on the right
+        tk.Button(row, text="🗑", command=lambda i=it: self.store.delete(i["id"]),
+                  bg=PANEL, fg="#9aa0b5", relief="flat", bd=0).pack(side="right", padx=2)
+        tk.Button(row, text=("📌" if pinned else "📍"),
+                  command=lambda i=it: self.store.set_pinned(i["id"], not i.get("pinned")),
+                  bg=(ACCENT if pinned else PANEL), fg=("#0b1020" if pinned else "#9aa0b5"),
+                  relief="flat", bd=0).pack(side="right", padx=2)
+        if it.get("kind") == "text":
+            mb = tk.Menubutton(row, text="Aa▾", bg=PANEL, fg="#9aa0b5", relief="flat",
+                               bd=0)
+            m = tk.Menu(mb, tearoff=0, bg=PANEL, fg=FG)
+            m.add_command(label="πεζά (lower)", command=lambda i=it: self._copy(i, str.lower))
+            m.add_command(label="ΚΕΦΑΛΑΙΑ (UPPER)", command=lambda i=it: self._copy(i, str.upper))
+            m.add_command(label="Κάθε Λέξη (Title)", command=lambda i=it: self._copy(i, str.title))
+            mb.config(menu=m)
+            mb.pack(side="right", padx=2)
+
+
 # ============ system tray (StatusNotifierItem via AppIndicator) ============
-def start_tray(root, vk, reader):
+def start_tray(root, vk, reader, store=None):
     """Add a KDE/SNI tray icon. Returns the GLib loop thread, or None if no SNI.
 
     Runs GTK's main loop in a daemon thread; menu callbacks hop back to the Tk
     thread via root.after(). The menu is exported over D-Bus (DBusMenu) and
-    rendered by Plasma, so we never draw GTK widgets ourselves.
+    rendered by Plasma, so we never draw GTK widgets ourselves. If a clipboard
+    `store` is given, a live "Πρόχειρο" submenu lists recent/pinned items for
+    one-click re-copy.
     """
     try:
         import gi
@@ -1298,6 +1634,45 @@ def start_tray(root, vk, reader):
         open_item = item("🪟  Άνοιγμα", vk._raise)
         item("🎤  Ομιλία (έναρξη/λήξη)", vk.toggle)
         item("🔊  Ανάγνωση προχείρου", vk.read_clipboard)
+
+        if store is not None:
+            menu.append(Gtk.SeparatorMenuItem())
+            clip_root = Gtk.MenuItem(label="📋  Πρόχειρο")
+            clip_menu = Gtk.Menu()
+            clip_root.set_submenu(clip_menu)
+            menu.append(clip_root)
+
+            def rebuild_clip():
+                for c in clip_menu.get_children():
+                    clip_menu.remove(c)
+                items = store.ordered()[:15]
+                if not items:
+                    mi = Gtk.MenuItem(label="(κενό)")
+                    mi.set_sensitive(False)
+                    clip_menu.append(mi)
+                for it in items:
+                    if it.get("kind") == "image":
+                        label = "🖼  " + os.path.basename(it.get("path", ""))
+                    else:
+                        label = " ".join(it.get("text", "").split())[:48] or "(κενό)"
+                    if it.get("pinned"):
+                        label = "📌 " + label
+                    mi = Gtk.MenuItem(label=label)
+                    mi.connect("activate", lambda _w, i=it: clipmod.recopy(i))
+                    clip_menu.append(mi)
+                clip_menu.append(Gtk.SeparatorMenuItem())
+                show_mi = Gtk.MenuItem(label="🪟  Άνοιγμα προχείρου")
+                show_mi.connect("activate", lambda *_: ui(vk.show_clipboard))
+                clip_menu.append(show_mi)
+                clear_mi = Gtk.MenuItem(label="🧹  Καθαρισμός")
+                clear_mi.connect("activate", lambda *_: store.clear())
+                clip_menu.append(clear_mi)
+                clip_menu.show_all()
+                return False
+
+            rebuild_clip()
+            store.add_listener(lambda: GLib.idle_add(rebuild_clip))
+
         menu.append(Gtk.SeparatorMenuItem())
         item("✖  Έξοδος", quit_all)
         menu.show_all()
@@ -1320,63 +1695,142 @@ def send_action(action):
         return False
 
 
+DL_TIMEOUT = 30          # seconds — applies to connect and to each read()
+
+
+def _download(url, dest, on_progress, timeout=DL_TIMEOUT):
+    """Stream `url` to `dest` with a socket timeout, reporting (done, total)
+    bytes. Writes to a .part file and renames on success so a half-finished
+    download is never mistaken for a complete one."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    req = urllib.request.Request(url, headers={"User-Agent": "voice-firstrun"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        on_progress(0, total)
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                on_progress(done, total)
+    os.replace(tmp, dest)
+
+
 def ensure_assets(root):
-    """On first run (lean install) download the whisper model + Piper voices."""
-    jobs = []
-    if not os.path.exists(MODEL):
-        jobs.append((WHISPER_URL, MODEL))
-    for quality, stem in (("medium", "el_GR-rapunzelina-medium"),
-                          ("low", "el_GR-rapunzelina-low")):
-        for ext in (".onnx", ".onnx.json"):
-            dest = os.path.join(VOICES_DIR, stem + ext)
-            if not os.path.exists(dest):
-                jobs.append((f"{VOICE_BASE}/{quality}/{stem}{ext}", dest))
-    if not jobs:
+    """On first run (lean install) download the whisper model + Piper voices.
+
+    Shows a modal progress dialog. On network failure it surfaces a clear error
+    with Retry / Continue / Quit instead of failing silently, and each transfer
+    has a timeout so an unreachable host can't hang the dialog forever."""
+    def pending():
+        jobs = []
+        if not os.path.exists(MODEL):
+            jobs.append((WHISPER_URL, MODEL))
+        for quality, stem in (("medium", "el_GR-rapunzelina-medium"),
+                              ("low", "el_GR-rapunzelina-low")):
+            for ext in (".onnx", ".onnx.json"):
+                dest = os.path.join(VOICES_DIR, stem + ext)
+                if not os.path.exists(dest):
+                    jobs.append((f"{VOICE_BASE}/{quality}/{stem}{ext}", dest))
+        return jobs
+
+    if not pending():
         return
 
     dlg = tk.Toplevel(root)
     dlg.title("Λήψη μοντέλων…")
     dlg.configure(bg=BG)
-    dlg.geometry("440x150")
+    dlg.geometry("460x210")
     dlg.transient(root)
     dlg.grab_set()
-    tk.Label(dlg, text="Πρώτη εκτέλεση — κατεβάζω τα μοντέλα φωνής (≈0.6 GB).\n"
-                       "Γίνεται μόνο μία φορά.", bg=BG, fg=FG, justify="left",
-             font=("Sans", 10)).pack(padx=16, pady=(16, 8), anchor="w")
-    info = tk.Label(dlg, text="", bg=BG, fg="#9aa0b5")
+    dlg.protocol("WM_DELETE_WINDOW", lambda: None)   # no closing mid-download
+
+    tk.Label(dlg, text="Καλώς ήρθες στο VOICE 👋", bg=BG, fg=FG,
+             font=("Sans", 12, "bold")).pack(padx=16, pady=(16, 2), anchor="w")
+    tk.Label(dlg, text="Πρώτη εκτέλεση: κατεβάζω τα μοντέλα φωνής (≈0.6 GB) — το\n"
+                       "μοντέλο αναγνώρισης ομιλίας και τις ελληνικές φωνές. Γίνεται\n"
+                       "μόνο μία φορά· μετά όλα δουλεύουν τοπικά, χωρίς ίντερνετ.",
+             bg=BG, fg="#9aa0b5", justify="left").pack(padx=16, pady=(0, 8), anchor="w")
+    info = tk.Label(dlg, text="Σύνδεση…", bg=BG, fg=FG)
     info.pack(padx=16, anchor="w")
-    bar = ttk.Progressbar(dlg, length=400, maximum=100)
-    bar.pack(padx=16, pady=12)
-    state = {"err": None}
+    bar = ttk.Progressbar(dlg, length=420, maximum=100)
+    bar.pack(padx=16, pady=10)
+    btns = tk.Frame(dlg, bg=BG)
+    btns.pack(padx=16, pady=(0, 8), anchor="e")
+
+    # Tkinter isn't thread-safe: the worker thread must not touch widgets. It
+    # pushes events onto a queue that the main thread drains in pump().
+    q = queue.Queue()
+
+    def clear_buttons():
+        for w in btns.winfo_children():
+            w.destroy()
 
     def work():
+        jobs = pending()
         try:
             for i, (url, dest) in enumerate(jobs, 1):
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
                 name = os.path.basename(dest)
 
-                def hook(blocks, bs, total, name=name, i=i):
-                    pct = (blocks * bs / total * 100) if total > 0 else 0
-                    root.after(0, lambda: (bar.config(value=pct), info.config(
-                        text=f"[{i}/{len(jobs)}]  {name}  —  {pct:0.0f}%")))
+                def prog(done, total, name=name, i=i, n=len(jobs)):
+                    pct = (done / total * 100) if total > 0 else 0
+                    mb = done / 1e6
+                    q.put(("progress", f"[{i}/{n}]  {name}  —  {mb:0.0f} MB"
+                           + (f"  ({pct:0.0f}%)" if total > 0 else ""), pct))
 
-                tmp = dest + ".part"
-                urllib.request.urlretrieve(url, tmp, hook)
-                os.replace(tmp, dest)
+                _download(url, dest, prog)
+            q.put(("done",))
         except Exception as e:
-            state["err"] = str(e)
-        root.after(0, dlg.destroy)
+            q.put(("error", str(e)))
 
-    threading.Thread(target=work, daemon=True).start()
+    def pump():
+        try:
+            while True:
+                ev = q.get_nowait()
+                if ev[0] == "progress":
+                    info.config(text=ev[1], fg=FG)
+                    bar.config(value=ev[2])
+                elif ev[0] == "done":
+                    dlg.destroy()
+                    return
+                elif ev[0] == "error":
+                    show_error(ev[1])
+                    return
+        except queue.Empty:
+            pass
+        root.after(120, pump)
+
+    def show_error(msg):
+        info.config(text="⚠ Η λήψη απέτυχε — έλεγξε τη σύνδεσή σου.", fg=GLOW_ON)
+        bar.config(value=0)
+        clear_buttons()
+        tk.Button(btns, text="Επανάληψη", command=start, bg=ACCENT, fg="#0b1020",
+                  relief="flat", font=("Sans", 10, "bold")).pack(side="left", padx=4)
+        tk.Button(btns, text="Συνέχεια χωρίς λήψη", command=dlg.destroy, bg=PANEL,
+                  fg=FG, relief="flat").pack(side="left", padx=4)
+        tk.Button(btns, text="Έξοδος", command=lambda: (dlg.destroy(),
+                  os._exit(1)), bg=PANEL, fg=FG, relief="flat").pack(side="left", padx=4)
+        print("⚠ asset download failed:", msg, file=sys.stderr)
+
+    def start():
+        clear_buttons()
+        info.config(text="Σύνδεση…", fg=FG)
+        bar.config(value=0)
+        threading.Thread(target=work, daemon=True).start()
+        root.after(120, pump)
+
+    start()
     root.wait_window(dlg)
-    if state["err"]:
-        print("⚠ asset download failed:", state["err"], file=sys.stderr)
 
 
 def main():
     # if launched with an action and an instance is already running, hand it over
     action = (sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in
-              ("talk", "read", "show") else None)
+              ("talk", "read", "show", "clip", "clipmini") else None)
     if action and send_action(action):
         return
     if not action and send_action("show"):
@@ -1428,14 +1882,20 @@ def main():
 
     ensure_assets(root)          # first-run: fetch models/voices if missing
 
+    # clipboard history: store + background watcher
+    clip_store = clipmod.ClipStore()
+    clip_watcher = clipmod.ClipWatcher(clip_store)
+
     nb = ttk.Notebook(root)
     tab_dict = tk.Frame(nb, bg=BG)
     tab_read = tk.Frame(nb, bg=BG)
     tab_meet = tk.Frame(nb, bg=BG)
+    tab_clip = tk.Frame(nb, bg=BG)
     tab_set = tk.Frame(nb, bg=BG)
     nb.add(tab_dict, text="🎤  Υπαγόρευση")
     nb.add(tab_read, text="📖  Ανάγνωση")
     nb.add(tab_meet, text="📝  Σύσκεψη")
+    nb.add(tab_clip, text="📋  Πρόχειρο")
     nb.add(tab_set, text="⚙  Ρυθμίσεις")
     nb.pack(fill="both", expand=True)
 
@@ -1443,16 +1903,23 @@ def main():
     vk = VoiceKeyboard(root, parent=tab_dict, notebook=nb, tab_read=tab_read,
                        reader=reader)
     MeetingTab(root, parent=tab_meet, notebook=nb)
+    clip_tab = ClipboardTab(root, parent=tab_clip, store=clip_store)
     SettingsTab(root, parent=tab_set, vk=vk)
+    vk.tab_clip = tab_clip
+    vk.clip_store = clip_store
     vk.start_control_server()
 
+    # refresh the tab whenever history changes (watcher runs off-thread → marshal)
+    clip_store.add_listener(lambda: root.after(0, clip_tab.refresh))
+    clip_watcher.start()
+
     # tray icon: closing the window hides to tray; "Έξοδος" truly quits
-    tray = start_tray(root, vk, reader)
+    tray = start_tray(root, vk, reader, store=clip_store)
     if tray:
         root.protocol("WM_DELETE_WINDOW", root.withdraw)
 
     # auto-fit window height per tab (no wasted space)
-    heights = {0: 540, 1: 560, 2: 620, 3: 680}
+    heights = {0: 540, 1: 560, 2: 620, 3: 620, 4: 680}
 
     def on_tab(_=None):
         if vk.mini:
@@ -1473,8 +1940,10 @@ def main():
     if action:                       # started fresh via a shortcut → do it
         if action == "talk":         # show compact mic for live feedback + control
             root.after(300, vk.toggle_mini)
-        root.after(900, lambda: vk.toggle() if action == "talk"
-                   else vk.read_clipboard())
+        _acts = {"talk": vk.toggle, "read": vk.read_clipboard,
+                 "show": vk._raise, "clip": vk.show_clipboard,
+                 "clipmini": vk.show_clip_mini}
+        root.after(900, _acts.get(action, vk._raise))
     root.mainloop()
 
 

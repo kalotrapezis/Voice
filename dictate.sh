@@ -36,13 +36,20 @@ if [ -f "$RECPID" ] && kill -0 "$(cat "$RECPID")" 2>/dev/null; then
 
   if [ -z "$TEXT" ]; then notify "(nothing heard)"; exit 0; fi
 
-  # type it where the cursor is
-  if command -v ydotool >/dev/null 2>&1; then
+  # type it where the cursor is — ydotool (Wayland/uinput) or xdotool (X11)
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v ydotool >/dev/null 2>&1; then
+    ydotool type --next-delay 0 -- "$TEXT"
+  elif command -v xdotool >/dev/null 2>&1; then
+    xdotool type --clearmodifiers -- "$TEXT"
+  elif command -v ydotool >/dev/null 2>&1; then
     ydotool type --next-delay 0 -- "$TEXT"
   else
     # fallback: copy to clipboard so you can paste manually
-    printf '%s' "$TEXT" | wl-copy
-    notify "ydotool missing — text copied to clipboard"
+    if command -v wl-copy >/dev/null 2>&1; then printf '%s' "$TEXT" | wl-copy
+    elif command -v xclip >/dev/null 2>&1; then printf '%s' "$TEXT" | xclip -selection clipboard
+    elif command -v xsel >/dev/null 2>&1; then printf '%s' "$TEXT" | xsel --clipboard --input
+    fi
+    notify "no typing tool — text copied to clipboard"
   fi
   notify "✓ $TEXT"
 else

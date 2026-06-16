@@ -186,8 +186,8 @@ class Reader:
 
     def _clip(self):
         try:
-            return subprocess.run(["wl-paste"], capture_output=True, text=True,
-                                  timeout=4).stdout.rstrip("\n")
+            from platform_io import clip_read
+            return clip_read()
         except Exception:
             return ""
 
