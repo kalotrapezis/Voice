@@ -57,6 +57,8 @@ FRAME_BYTES = FRAME * 2
 SILENCE_HANG = 18           # ~0.55 s of quiet ends a phrase
 MIN_SPEECH = 7              # ignore blips shorter than ~0.2 s
 PREROLL = 6                 # ~0.18 s kept before speech onset
+MAX_SEG_SEC = 12            # force-flush a phrase this long even without a pause
+MAX_SEG_BYTES = MAX_SEG_SEC * SR * 2
 
 # ---- colors ----
 BG = "#1e1f2b"
@@ -128,6 +130,23 @@ def transcribe(path, lang):
         return ""
 
 
+def raw_capture_cmd(dev):
+    """Command that streams headerless s16le / 16 kHz / mono PCM on stdout.
+
+    Prefer `parec` (PulseAudio / pipewire-pulse — the same stack we already use
+    via `pactl`): it resamples and converts to exactly the requested format and
+    writes raw samples with no container. `pw-record --raw` does NOT reliably
+    convert to the requested format on every backend — on some setups (notably
+    Mint) it passes the device's native format through, which we then misread as
+    s16 (dead level meter, no speech detected, garbage to whisper). pw-record is
+    kept only as a fallback for the rare box without parec."""
+    if shutil.which("parec"):
+        return ["parec", "-d", dev, "--rate=16000", "--channels=1",
+                "--format=s16le", "--latency-msec=30"]
+    return ["pw-record", "--target", dev, "--rate", "16000", "--channels", "1",
+            "--format", "s16", "--raw", "-"]
+
+
 def run_vad_capture(proc, stop_event, on_segment, on_level=None):
     """Read 16 kHz/mono/s16 frames from proc.stdout and split into phrases on
     pauses (simple energy VAD). Calls on_segment(pcm_bytes) per detected phrase
@@ -174,10 +193,12 @@ def run_vad_capture(proc, stop_event, on_segment, on_level=None):
                 silence, speech_frames = 0, speech_frames + 1
             else:
                 silence += 1
-                if silence >= SILENCE_HANG:
-                    if speech_frames >= MIN_SPEECH:
-                        on_segment(bytes(seg))
-                    in_speech, seg, preroll = False, bytearray(), []
+            # End the phrase on a pause, or force-flush if it runs too long so a
+            # noisy floor that never dips below threshold can't trap us forever.
+            if silence >= SILENCE_HANG or len(seg) >= MAX_SEG_BYTES:
+                if speech_frames >= MIN_SPEECH:
+                    on_segment(bytes(seg))
+                in_speech, seg, preroll = False, bytearray(), []
     if in_speech and speech_frames >= MIN_SPEECH:
         on_segment(bytes(seg))
 
@@ -769,8 +790,7 @@ class VoiceKeyboard:
             except queue.Empty:
                 break
         self.cont_proc = subprocess.Popen(
-            ["pw-record", "--target", dev, "--rate", "16000", "--channels", "1",
-             "--format", "s16", "--raw", "-"],
+            raw_capture_cmd(dev),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         threading.Thread(target=self._capture_loop, daemon=True).start()
         threading.Thread(target=self._worker_loop, daemon=True).start()
@@ -1135,8 +1155,7 @@ class MeetingTab:
             except queue.Empty:
                 break
         self.proc = subprocess.Popen(
-            ["pw-record", "--target", dev, "--rate", "16000", "--channels", "1",
-             "--format", "s16", "--raw", "-"],
+            raw_capture_cmd(dev),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
         threading.Thread(target=self._capture_loop, daemon=True).start()
         threading.Thread(target=self._worker_loop, daemon=True).start()

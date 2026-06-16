@@ -4,6 +4,10 @@
 #
 # Text source priority: command args  →  stdin  →  highlighted (PRIMARY) selection  →  clipboard.
 # So the typical use is: highlight Claude's reply, press the hotkey, hear it.
+
+# Re-exec under bash if launched via sh/dash (hotkey bindings & some launchers do
+# this, ignoring the shebang) — we rely on pipefail, ${BASH_SOURCE[0]} and ${VAR//}.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
