@@ -7,9 +7,9 @@
 %global __requires_exclude ^(libwhisper|libggml.*|libpiper_phonemize|libonnxruntime|libespeak-ng)\\.so.*$
 
 Name:           voice
-Version:        0.0.2
+Version:        0.0.3
 Release:        1%{?dist}
-Summary:        Greek voice keyboard & read-aloud (offline STT/TTS) for KDE Wayland
+Summary:        Greek voice keyboard & read-aloud (offline STT/TTS) for Linux (KDE/Cinnamon)
 
 License:        GPL-3.0-or-later
 URL:            https://github.com/kalotrapezis/Voice
@@ -22,12 +22,17 @@ Requires:       python3
 Requires:       python3-tkinter
 Requires:       python3-gobject
 Requires:       libappindicator-gtk3
-Requires:       ydotool
-Requires:       wl-clipboard
 Requires:       pipewire-utils
 Requires:       pulseaudio-utils
 Requires:       poppler-utils
 Requires:       glib2
+# Wayland (KDE Plasma) input/clipboard path
+Requires:       ydotool
+Requires:       wl-clipboard
+# X11 (Cinnamon, GNOME-on-X11) input/clipboard/window path
+Recommends:     xdotool
+Recommends:     xclip
+Recommends:     wmctrl
 
 %description
 VOICE (Voice On-device Intelligent Control Environment) is a fully local,
@@ -47,6 +52,8 @@ install -d $APP $APP/whisper.cpp/build/bin $APP/whisper.cpp/build/src $APP/whisp
 # python app + assets (only the runtime PNG icon — skip .psd/.ico sources)
 install -m644 %{projdir}/voice_keyboard.py $APP/
 install -m644 %{projdir}/read_aloud.py    $APP/
+install -m644 %{projdir}/platform_io.py   $APP/
+install -m644 %{projdir}/clipboard.py     $APP/
 install -Dm644 %{projdir}/Assets/VoiceIcon.png $APP/Assets/VoiceIcon.png
 cp -a %{projdir}/piper_tts $APP/
 
@@ -96,6 +103,17 @@ install -Dm644 %{projdir}/LICENSE \
 /usr/bin/update-desktop-database &>/dev/null || :
 
 %changelog
+* Mon Jun 16 2026 Theologos Kalotrapezis <kalotrapezis@gmail.com> - 0.0.3-1
+- Cross-desktop support: runs on Cinnamon/X11 (Linux Mint) and other X11 desktops
+  in addition to KDE Plasma; backend chosen at runtime (KWin/ydotool/wl-clipboard
+  vs wmctrl/xdotool/xclip) via platform_io
+- Add .deb packaging (build_deb.sh) for Debian/Ubuntu/Mint/Kubuntu
+- Clipboard manager: background watcher, history with image thumbnails, pinning
+  (persists across reboots), case transforms, Clear all; tab + tray list + an
+  always-on-top mini view (Ctrl+Alt+Z)
+- Harden first-run model download: network timeout + retry/continue/quit dialog,
+  thread-safe progress updates
+
 * Sat Jun 06 2026 Theologos Kalotrapezis <kalotrapezis@gmail.com> - 0.0.2-1
 - Add Meeting transcription tab: capture system audio or mic, live timestamped
   transcript, export to Markdown (meeting-YYYY-MM-DD-HHMMSS.md)

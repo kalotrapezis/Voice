@@ -16,5 +16,8 @@ __pycache__/
 *.swp
 .DS_Store
 
+# Local Claude Code config
+.claude/
+
 # RPM build output
 build/

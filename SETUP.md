@@ -1,25 +1,47 @@
-# Voice Keyboard — Setup (Linux / Wayland / KDE)
+# Voice Keyboard — Setup (Linux · KDE Plasma or Cinnamon/X11)
 
 A push-to-talk dictation tool: press a hotkey, speak Greek, press again → text is typed
-into whatever app is focused. 100% offline. Engines: **whisper.cpp** (STT) + **ydotool** (typing).
+into whatever app is focused. 100% offline. Engines: **whisper.cpp** (STT) + **Piper** (TTS).
+Typing/paste is **ydotool** on Wayland and **xdotool** on X11 — picked automatically.
 
 ---
 
 ## 1. Install the engines (needs root — run in your terminal)
 
+**Fedora KDE:**
 ```bash
-sudo dnf install -y ydotool gcc-c++ cmake make
+sudo dnf install -y ydotool wl-clipboard gcc-c++ cmake make poppler-utils
+# X11 desktops (Cinnamon, GNOME-on-X11) also want:
+sudo dnf install -y xdotool xclip wmctrl
 ```
 
-> ⚠️ Do **not** `dnf install whisper-cpp` — Fedora builds it against ROCm + OpenVINO and
-> pulls **557 packages / 1.8 GB** of GPU libraries you don't have. We build a 1 MB
-> CPU-only binary from source instead (done — see `whisper.cpp/build/bin/whisper-cli`).
+**Debian / Ubuntu / Linux Mint / Kubuntu:**
+```bash
+sudo apt install -y g++ cmake make poppler-utils \
+  xdotool xclip wmctrl ydotool wl-clipboard \
+  python3-tk python3-gi gir1.2-ayatanaappindicator3-0.1
+```
+
+> ⚠️ Do **not** install the distro `whisper-cpp` package — Fedora builds it against
+> ROCm + OpenVINO (≈1.8 GB of GPU libs). We build a ~1 MB CPU-only binary from source
+> (see `whisper.cpp/build/bin/whisper-cli`).
+>
+> ⚠️ **Build whisper.cpp on the oldest glibc you target.** A binary built on Fedora 44
+> (glibc 2.43) will not run on Ubuntu/Mint 24.04 (glibc 2.39: `GLIBC_2.43 not found`).
+> Build it on Ubuntu/Mint and it runs on both:
+> ```bash
+> cmake -S whisper.cpp -B whisper.cpp/build -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release
+> cmake --build whisper.cpp/build -j"$(nproc)"
+> ```
 
 The Greek-capable model (`models/ggml-small.bin`, 466 MB) is already downloaded.
 
 ---
 
-## 2. ydotool daemon (already set up on this machine)
+## 2. Typing daemon — Wayland only (X11 needs nothing)
+
+On **X11 (Cinnamon/Linux Mint)** typing/paste uses `xdotool`, which needs no daemon — skip
+this section. On **KDE/Wayland** `ydotool` types via the kernel's `/dev/uinput`:
 
 `ydotool` types via the kernel's `/dev/uinput`. On KDE/Wayland, logind already grants your
 active session ACL access (`getfacl /dev/uinput` shows `user:teo:rw-`), so **no udev rule,
