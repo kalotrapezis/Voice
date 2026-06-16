@@ -3,6 +3,10 @@
 # Run once: start recording. Run again: stop, transcribe (Greek), type into focused app.
 #
 # Bind this script to a hotkey in KDE: System Settings → Shortcuts → Custom Shortcuts.
+
+# Re-exec under bash if launched via sh/dash (hotkey bindings & some launchers do
+# this, ignoring the shebang) — we rely on pipefail and ${BASH_SOURCE[0]} below.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
 # ---------------- config ----------------
