@@ -607,6 +607,11 @@ class VoiceKeyboard:
         if store is not None and self._mini_listener_added:
             store.remove_listener(self._mini_refresh)
             self._mini_listener_added = False
+        # show_clip_mini may have forced topmost on; restore the user's setting.
+        try:
+            self.apply_topmost()
+        except Exception:
+            pass
 
     def _mini_refresh(self):
         # store listeners fire on the watcher thread → marshal to Tk
@@ -636,16 +641,19 @@ class VoiceKeyboard:
             txt = " ".join(it.get("text", "").split())
         if len(txt) > 40:
             txt = txt[:40] + "…"
-        lbl = tk.Label(row, text=txt or "(κενό)", bg=PANEL, fg=FG, anchor="w",
-                       cursor="hand2", font=("Sans", 9))
-        lbl.pack(side="left", fill="x", expand=True, padx=6, pady=4)
-        lbl.bind("<Button-1>", lambda e, i=it: self._mini_clip_pick(i))
+        # Pin button is packed FIRST so it always keeps its slot on the right;
+        # the label then fills whatever width is left and clips overflowing text
+        # there (instead of growing the row and shoving the button off-screen).
         pinned = it.get("pinned")
         tk.Button(row, text=("📌" if pinned else "📍"), relief="flat", bd=0,
                   font=("Sans", 9), bg=(ACCENT if pinned else PANEL),
                   fg=("#0b1020" if pinned else "#9aa0b5"),
                   command=lambda i=it: self.clip_store.set_pinned(
                       i["id"], not i.get("pinned"))).pack(side="right", padx=1)
+        lbl = tk.Label(row, text=txt or "(κενό)", bg=PANEL, fg=FG, anchor="w",
+                       cursor="hand2", font=("Sans", 9), width=1)
+        lbl.pack(side="left", fill="x", expand=True, padx=6, pady=4)
+        lbl.bind("<Button-1>", lambda e, i=it: self._mini_clip_pick(i))
 
     def _mini_clip_pick(self, it):
         clipmod.recopy(it)
@@ -665,12 +673,32 @@ class VoiceKeyboard:
             yield from VoiceKeyboard._descendants(c)
 
     def show_clip_mini(self):
-        """Clip shortcut: toggle the always-on-top mini clipboard view."""
+        """Clip shortcut: toggle the always-on-top mini clipboard view, opening
+        it under the mouse and keeping it on top so you can click an item."""
         if self.mini_clip_open:
             self.toggle_mini_clip(False)
         else:
-            self._raise()
-            self.toggle_mini_clip(True)
+            self.root.deiconify()
+            self.toggle_mini_clip(True)       # builds list, sets size to 250x250
+            self._place_at_pointer(250, 250)
+            self.root.lift()
+            self.root.attributes("-topmost", True)   # stay on top until dismissed
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+
+    def _place_at_pointer(self, w, h):
+        """Move the window so it appears at the mouse pointer, clamped on-screen."""
+        try:
+            px, py = self.root.winfo_pointerxy()
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            x = max(0, min(px - 20, sw - w))
+            y = max(0, min(py - 20, sh - h))
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
 
     def read_clipboard(self):
         """Mini speaker button: speak clipboard (Ctrl+C'd text), or stop if speaking."""
