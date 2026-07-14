@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-v0.0.3-5b8cff">
+  <img alt="version" src="https://img.shields.io/badge/version-v0.0.4-5b8cff">
   <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20KDE%20%C2%B7%20Cinnamon-1e1f2b">
   <img alt="deps" src="https://img.shields.io/badge/UI-pure%20Tkinter%20(no%20pip)-3a3d52">
   <img alt="license" src="https://img.shields.io/badge/license-see%20LICENSE-lightgrey">
@@ -71,7 +71,7 @@ The easiest way on Fedora KDE. `dnf` pulls every runtime dependency automaticall
 
 ```bash
 # grab the .rpm from the latest release, then:
-sudo dnf install ./voice-0.0.3-1.fc44.x86_64.rpm
+sudo dnf install ./voice-0.0.4-1.fc44.x86_64.rpm
 ```
 
 Launch **“VOICE — Φωνή”** from the app menu, or run `voice`. The speech models
@@ -91,7 +91,7 @@ sudo dnf install -y rpm-build patchelf
 
 ```bash
 # grab the .deb from the latest release, then:
-sudo apt install ./voice_0.0.3_amd64.deb
+sudo apt install ./voice_0.0.4_amd64.deb
 ```
 
 **Build the DEB yourself** (needs `whisper.cpp` built + `piper_tts/` present):

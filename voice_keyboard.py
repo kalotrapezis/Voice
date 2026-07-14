@@ -332,6 +332,9 @@ class VoiceKeyboard:
         self.seg_counter = 0
         self._have_focus = False        # does OUR window hold keyboard focus?
         self.text_shown = False
+        # feature switches (Settings tab) — main() replaces this with a real
+        # lookup; global shortcuts respect it even when a tab is hidden
+        self.feature_on = lambda key: True
 
         if self.parent is root:
             root.title("Φωνητικό Πληκτρολόγιο")
@@ -567,7 +570,7 @@ class VoiceKeyboard:
             self.controls.pack(fill="both", expand=True, padx=16, after=self.mic_area)
             if self.notebook is not None:
                 self.notebook.configure(style="TNotebook")
-                if self.tab_read is not None:
+                if self.tab_read is not None and self.feature_on("READ"):
                     self.notebook.add(self.tab_read)         # restore reading tab
             self.root.minsize(300, 320)
             self.root.geometry("560x660")
@@ -675,6 +678,8 @@ class VoiceKeyboard:
     def show_clip_mini(self):
         """Clip shortcut: toggle the always-on-top mini clipboard view, opening
         it under the mouse and keeping it on top so you can click an item."""
+        if not self.feature_on("CLIP"):
+            return
         if self.mini_clip_open:
             self.toggle_mini_clip(False)
         else:
@@ -702,7 +707,7 @@ class VoiceKeyboard:
 
     def read_clipboard(self):
         """Mini speaker button: speak clipboard (Ctrl+C'd text), or stop if speaking."""
-        if not self.reader:
+        if not self.reader or not self.feature_on("READ"):
             return
         if self.reader.speaking:
             self.reader.stop()
@@ -751,6 +756,8 @@ class VoiceKeyboard:
 
     # ---------- toggle dispatch ----------
     def toggle(self):
+        if not self.feature_on("DICT"):
+            return
         if self.cont_on:
             self.stop_continuous()
         elif self.recording:
@@ -834,6 +841,20 @@ class VoiceKeyboard:
             except Exception:
                 pass
             self.cont_proc = None
+        # Drop the backlog: anything not yet transcribed is discarded, otherwise
+        # the worker keeps activating windows and pasting long after "stop",
+        # which looks like the app clicking all over the desktop.
+        while True:
+            try:
+                p = self.seg_queue.get_nowait()
+            except queue.Empty:
+                break
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        self.seg_queue.put(None)                  # end the worker thread now
         self.live_level = 0.0
         self.level.coords(self.level_bar, 0, 0, 0, 12)
         self.draw_mic()
@@ -867,7 +888,8 @@ class VoiceKeyboard:
 
     def _emit_chunk(self, txt):
         self._append(txt)
-        if self.deliver_var.get():
+        # never deliver after stop — the in-flight segment may land late
+        if self.deliver_var.get() and self.cont_on:
             threading.Thread(target=self.deliver, args=(txt + " ", self._have_focus),
                              daemon=True).start()
 
@@ -962,6 +984,8 @@ class VoiceKeyboard:
 
     def show_clipboard(self):
         """Raise the window on the clipboard tab — the Win+V-style quick view."""
+        if not self.feature_on("CLIP"):
+            return
         if getattr(self, "mini", False):
             self.toggle_mini()
         self._raise()
@@ -1275,15 +1299,33 @@ class MeetingTab:
 
 
 class SettingsTab:
-    def __init__(self, root, parent, vk=None):
+    FEATURES = [("DICT", "🎤 Υπαγόρευση"), ("READ", "📖 Ανάγνωση"),
+                ("MEET", "📝 Σύσκεψη"), ("CLIP", "📋 Πρόχειρο")]
+
+    def __init__(self, root, parent, vk=None, features_cb=None):
         self.root = root
         self.vk = vk
+        self.features_cb = features_cb
         self.cfg = load_config()
         parent.configure(bg=BG)
 
+        # --- feature switches: one per tab section ---
+        tk.Label(parent, text="🧩  Λειτουργίες (απενεργοποίηση καρτελών)", bg=BG,
+                 fg=FG, font=("Sans", 12, "bold")).pack(anchor="w", padx=16,
+                 pady=(16, 2))
+        frow = tk.Frame(parent, bg=BG); frow.pack(fill="x", padx=16)
+        self.feat_vars = {}
+        for i, (key, label) in enumerate(self.FEATURES):
+            v = tk.BooleanVar(value=self.cfg.get("FEAT_" + key, "1") == "1")
+            self.feat_vars[key] = v
+            ttk.Checkbutton(frow, text=label, variable=v,
+                            command=lambda k=key: self.on_feature(k)).grid(
+                            row=i // 2, column=i % 2, sticky="w",
+                            padx=(0, 30), pady=1)
+
         # --- microphone (moved here from the dictation tab) ---
         tk.Label(parent, text="🎙  Μικρόφωνο", bg=BG, fg=FG,
-                 font=("Sans", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 2))
+                 font=("Sans", 12, "bold")).pack(anchor="w", padx=16, pady=(10, 2))
         mrow = tk.Frame(parent, bg=BG); mrow.pack(fill="x", padx=16)
         self.device_var = tk.StringVar()
         self.device_box = ttk.Combobox(mrow, textvariable=self.device_var,
@@ -1376,6 +1418,13 @@ class SettingsTab:
             self.export_var.set(d)
             cfg = load_config(); cfg["MEETING_DIR"] = d
             save_config(cfg); self.cfg = cfg
+
+    def on_feature(self, key):
+        cfg = load_config()
+        cfg["FEAT_" + key] = "1" if self.feat_vars[key].get() else "0"
+        save_config(cfg); self.cfg = cfg
+        if self.features_cb:
+            self.features_cb(cfg)
 
     def on_showtext(self):
         cfg = load_config()
@@ -1949,9 +1998,38 @@ def main():
     reader = Reader(root, parent=tab_read)
     vk = VoiceKeyboard(root, parent=tab_dict, notebook=nb, tab_read=tab_read,
                        reader=reader)
-    MeetingTab(root, parent=tab_meet, notebook=nb)
+    meet = MeetingTab(root, parent=tab_meet, notebook=nb)
     clip_tab = ClipboardTab(root, parent=tab_clip, store=clip_store)
-    SettingsTab(root, parent=tab_set, vk=vk)
+
+    # --- per-tab feature switches (Settings) ---
+    feat_tabs = {"DICT": tab_dict, "READ": tab_read,
+                 "MEET": tab_meet, "CLIP": tab_clip}
+
+    def apply_features(cfg=None):
+        cfg = cfg or load_config()
+        for key, frame in feat_tabs.items():
+            on = cfg.get("FEAT_" + key, "1") == "1"
+            if key == "READ" and vk.mini:
+                continue                     # mini mode manages the reading tab
+            try:
+                nb.add(frame) if on else nb.hide(frame)
+            except tk.TclError:
+                pass
+        # stop whatever a disabled feature is doing right now
+        if cfg.get("FEAT_DICT", "1") != "1":
+            if vk.cont_on:
+                vk.stop_continuous()
+            elif vk.recording:
+                vk.stop_and_transcribe()
+        if cfg.get("FEAT_READ", "1") != "1" and reader.speaking:
+            reader.stop()
+        if cfg.get("FEAT_MEET", "1") != "1" and meet.on:
+            meet.stop_and_export()
+        clip_watcher.paused = cfg.get("FEAT_CLIP", "1") != "1"
+
+    vk.feature_on = lambda key: load_config().get("FEAT_" + key, "1") == "1"
+    SettingsTab(root, parent=tab_set, vk=vk, features_cb=apply_features)
+    apply_features()
     vk.tab_clip = tab_clip
     vk.clip_store = clip_store
     vk.start_control_server()
@@ -1966,7 +2044,7 @@ def main():
         root.protocol("WM_DELETE_WINDOW", root.withdraw)
 
     # auto-fit window height per tab (no wasted space)
-    heights = {0: 540, 1: 560, 2: 620, 3: 620, 4: 680}
+    heights = {0: 540, 1: 560, 2: 620, 3: 620, 4: 760}
 
     def on_tab(_=None):
         if vk.mini:
