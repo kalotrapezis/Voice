@@ -269,6 +269,7 @@ class ClipWatcher:
     def __init__(self, store):
         self.store = store
         self.stop = threading.Event()
+        self.paused = False              # feature toggle: skip capture, keep thread
         self._last = None
         self._thread = None
 
@@ -282,6 +283,9 @@ class ClipWatcher:
 
     def _run(self):
         while not self.stop.is_set():
+            if self.paused:
+                self.stop.wait(POLL_SEC)
+                continue
             try:
                 entry = _capture()
                 if entry and entry["id"] != self._last:

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-VERSION="${VERSION:-0.0.3}"
+VERSION="${VERSION:-0.0.4}"
 ARCH="${ARCH:-amd64}"
 PKG="voice_${VERSION}_${ARCH}"
 OUT="$PROJ/build/deb"
