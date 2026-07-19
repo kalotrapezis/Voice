@@ -38,6 +38,26 @@ available as `voice`, unchanged.
 - Project icon set under `Assets/SVGs/` (microphone on/off, speaker on/off,
   meeting, clipboard, pin, gear) in matching light and dark variants.
 
+### Fixed
+
+- **Dictated text arriving twice.** Every take was written to one fixed temp
+  file (`/tmp/voice_gtk_dict.wav`) and transcribed on its own thread, so
+  overlapping takes overwrote each other's audio and the same speech came back
+  twice. Transcription now runs on a single worker queue with a unique temp
+  file per take.
+- **Input flood after pressing stop.** Segments already queued kept being
+  transcribed, activating windows and pasting long after capture stopped —
+  which feels like the app clicking all over the desktop. Stopping now drops
+  the backlog and invalidates work already in flight, so nothing is delivered
+  after you stop. (Same class of bug as the v0.0.4 fix for the Tk app.)
+- **Capture process left running** after stop in some cases; the recorder now
+  terminates, then kills, and reaps it.
+- **Missing window icon.** GTK 4 only takes window icons from the icon theme,
+  so the app now ships a `hicolor` copy of its icon and registers it, and the
+  GTK desktop entry is named after the application-id
+  (`io.github.kalotrapezis.voice.desktop`) so Wayland compositors match the
+  window to it.
+
 ### Changed
 
 - Global shortcuts are registered by the GTK app the same way as before

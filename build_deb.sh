@@ -7,7 +7,8 @@
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-VERSION="${VERSION:-0.0.5}"
+# upstream version 0.0.5, packaging revision "a" (post-tag dictation/icon fixes)
+VERSION="${VERSION:-0.0.5-a}"
 ARCH="${ARCH:-amd64}"
 PKG="voice_${VERSION}_${ARCH}"
 OUT="$PROJ/build/deb"
@@ -38,6 +39,8 @@ install -Dm644 "$PROJ/Assets/VoiceIcon.png" "$APP/Assets/VoiceIcon.png"
 # icon set used by the GTK 4 UI
 install -d "$APP/Assets/SVGs"
 install -m644 "$PROJ"/Assets/SVGs/*.svg "$APP/Assets/SVGs/"
+install -Dm644 "$PROJ/Assets/icons/hicolor/256x256/apps/voice.png" \
+  "$APP/Assets/icons/hicolor/256x256/apps/voice.png"
 cp -a "$PROJ/piper_tts" "$APP/"
 
 # whisper-cli + its private libs
@@ -63,8 +66,10 @@ fi
 install -Dm755 "$PROJ/packaging/voice.launcher" "$STAGE/usr/bin/voice"
 install -Dm755 "$PROJ/packaging/voice-gtk.launcher" "$STAGE/usr/bin/voice-gtk"
 install -Dm644 "$PROJ/packaging/voice.desktop"  "$STAGE/usr/share/applications/voice.desktop"
-install -Dm644 "$PROJ/packaging/voice-gtk.desktop" \
-  "$STAGE/usr/share/applications/voice-gtk.desktop"
+# named after the GTK app's application-id, so Wayland compositors match the
+# window to this entry and show its icon
+install -Dm644 "$PROJ/packaging/io.github.kalotrapezis.voice.desktop" \
+  "$STAGE/usr/share/applications/io.github.kalotrapezis.voice.desktop"
 install -Dm644 "$PROJ/Assets/VoiceIcon.png" \
   "$STAGE/usr/share/icons/hicolor/256x256/apps/voice.png"
 install -Dm644 "$PROJ/LICENSE" "$STAGE/usr/share/doc/voice/copyright"

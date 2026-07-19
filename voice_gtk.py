@@ -20,8 +20,10 @@ logged.
 import os
 import sys
 import time
+import queue
 import shutil
 import datetime
+import tempfile
 import threading
 import subprocess
 from collections import deque
@@ -169,11 +171,19 @@ window.voice-mini.expanded { border-radius: 20px; }
 
 
 def _load_css():
+    display = Gdk.Display.get_default()
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS)
     Gtk.StyleContext.add_provider_for_display(
-        Gdk.Display.get_default(), provider,
-        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    # Window/taskbar icon. GTK 4 has no per-window icon-from-file: the icon
+    # must come from the icon theme by name. Add the bundled hicolor tree so
+    # "voice" resolves when running from a source checkout too (installed
+    # copies find it in /usr/share/icons).
+    theme = Gtk.IconTheme.get_for_display(display)
+    theme.add_search_path(os.path.join(HERE, "Assets", "icons"))
+    Gtk.Window.set_default_icon_name("voice")
 
 
 # ---------------------------------------------------------------- engines
@@ -273,15 +283,87 @@ class Recorder:
     def stop(self):
         if self.stop_event:
             self.stop_event.set()
-        if self.proc:
+        proc, self.proc = self.proc, None
+        if proc:
             try:
-                self.proc.terminate()
+                proc.terminate()
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()                    # never leave capture running
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()        # unblock a reader mid-frame
             except Exception:
                 pass
         if self.thread:
             self.thread.join(timeout=2)
-        self.proc = None
+        self.thread = None
         return bytes(self.buffer)
+
+
+class Transcriber:
+    """Runs whisper on one worker thread, newest work last.
+
+    A queue rather than a thread per segment, for two reasons that were both
+    real bugs: concurrent takes shared a single temp wav path, so one take
+    could overwrite another's audio and the same speech got transcribed (and
+    delivered) twice; and pending segments kept activating windows and
+    pasting long after "stop" was pressed, which feels like the app clicking
+    all over the desktop. `cancel()` drops the backlog so neither can happen.
+    """
+
+    def __init__(self):
+        self.q = queue.Queue()
+        self._gen = 0
+        self._lock = threading.Lock()
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    @property
+    def generation(self):
+        with self._lock:
+            return self._gen
+
+    def submit(self, pcm, lang, on_text):
+        self.q.put((self.generation, pcm, lang, on_text))
+
+    def cancel(self):
+        """Invalidate queued and in-flight work (called when capture stops)."""
+        with self._lock:
+            self._gen += 1
+        while True:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                return
+
+    def _loop(self):
+        while True:
+            gen, pcm, lang, on_text = self.q.get()
+            if gen != self.generation:                 # stopped since queued
+                continue
+            if len(pcm) < vk.FRAME_BYTES * vk.MIN_SPEECH:
+                continue
+            fd, wav = tempfile.mkstemp(prefix="voice-gtk-", suffix=".wav")
+            os.close(fd)
+            try:
+                vk.write_wav(wav, pcm)
+                txt = vk.transcribe(wav, lang)
+            except Exception:
+                txt = ""
+            finally:
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+            # re-check: "stop" may have been pressed while whisper ran
+            if txt and gen == self.generation:
+                GLib.idle_add(on_text, txt)
 
 
 def deliver_text(txt, target_key=None, do_paste=True):
@@ -530,6 +612,7 @@ class DictationPage(Gtk.Box):
 
         # engine state
         self.rec = Recorder()
+        self.transcriber = Transcriber()
         self.levels = deque([0.0] * 60, maxlen=60)
         self.t0 = None
         self._tick_id = None
@@ -590,12 +673,13 @@ class DictationPage(Gtk.Box):
         if self.rec.running:
             if self.mode_toggle.get_active():          # continuous → stop
                 self.rec.stop()
+                # drop anything still queued, or it keeps pasting after stop
+                self.transcriber.cancel()
                 self._stop_ui()
             else:                                      # PTT → transcribe take
                 pcm = self.rec.stop()
                 self._stop_ui("Μεταγραφή…")
-                threading.Thread(target=self._transcribe_take,
-                                 args=(pcm,), daemon=True).start()
+                self.transcriber.submit(pcm, self._lang(), self._got_text)
             return
         dev = self.win.settings().mic_device()
         if self.mode_toggle.get_active():
@@ -607,17 +691,7 @@ class DictationPage(Gtk.Box):
             self._start_ui("Ομιλία σε εξέλιξη…")
 
     def _on_segment(self, pcm):
-        threading.Thread(target=self._transcribe_take, args=(pcm,),
-                         daemon=True).start()
-
-    def _transcribe_take(self, pcm):
-        if len(pcm) < vk.FRAME_BYTES * vk.MIN_SPEECH:
-            GLib.idle_add(self.status.set_label, "Έτοιμο")
-            return
-        wav = "/tmp/voice_gtk_dict.wav"
-        vk.write_wav(wav, pcm)
-        txt = vk.transcribe(wav, self._lang())
-        GLib.idle_add(self._got_text, txt)
+        self.transcriber.submit(pcm, self._lang(), self._got_text)
 
     def _got_text(self, txt):
         if not self.rec.running:
@@ -820,6 +894,7 @@ class MeetingPage(Gtk.Box):
         self.append(body)
 
         self.rec = Recorder()
+        self.transcriber = Transcriber()
         self.t0 = None
         self.lines = []
         self.wave.set_draw_func(self._draw_wave)
@@ -856,6 +931,7 @@ class MeetingPage(Gtk.Box):
     def _on_record(self, btn):
         if self.rec.running:
             self.rec.stop()
+            self.transcriber.cancel()
             self._export()
             return
         st = self.win.settings()
@@ -873,15 +949,9 @@ class MeetingPage(Gtk.Box):
 
     def _on_segment(self, pcm):
         stamp = self._stamp()
-
-        def work():
-            wav = f"/tmp/voice_gtk_meet_{stamp.replace(':', '')}.wav"
-            vk.write_wav(wav, pcm)
-            txt = vk.transcribe(wav, self.win.settings().meet_lang())
-            os.unlink(wav)
-            if txt:
-                GLib.idle_add(self.add_line, stamp, txt)
-        threading.Thread(target=work, daemon=True).start()
+        self.transcriber.submit(
+            pcm, self.win.settings().meet_lang(),
+            lambda txt, s=stamp: self.add_line(s, txt))
 
     def _export(self):
         if not self.lines:
