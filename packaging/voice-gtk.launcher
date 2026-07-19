@@ -1,0 +1,6 @@
+#!/bin/sh
+# VOICE (GTK 4 UI) launcher — same bundled engines as the Tk launcher, so the
+# loader needs the private whisper.cpp libs on its path here too.
+APP=/usr/lib/voice
+export LD_LIBRARY_PATH="$APP/whisper.cpp/build/src:$APP/whisper.cpp/build/ggml/src${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec python3 "$APP/voice_gtk.py" "$@"
