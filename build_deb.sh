@@ -7,7 +7,7 @@
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-VERSION="${VERSION:-0.0.4}"
+VERSION="${VERSION:-0.0.5}"
 ARCH="${ARCH:-amd64}"
 PKG="voice_${VERSION}_${ARCH}"
 OUT="$PROJ/build/deb"
@@ -30,10 +30,14 @@ install -d "$APP/whisper.cpp/build/bin" "$APP/whisper.cpp/build/src" \
 
 # python app + runtime icon (skip .psd/.ico sources)
 install -m644 "$PROJ/voice_keyboard.py" "$APP/"
+install -m644 "$PROJ/voice_gtk.py"      "$APP/"
 install -m644 "$PROJ/read_aloud.py"     "$APP/"
 install -m644 "$PROJ/platform_io.py"    "$APP/"
 install -m644 "$PROJ/clipboard.py"      "$APP/"
 install -Dm644 "$PROJ/Assets/VoiceIcon.png" "$APP/Assets/VoiceIcon.png"
+# icon set used by the GTK 4 UI
+install -d "$APP/Assets/SVGs"
+install -m644 "$PROJ"/Assets/SVGs/*.svg "$APP/Assets/SVGs/"
 cp -a "$PROJ/piper_tts" "$APP/"
 
 # whisper-cli + its private libs
@@ -54,9 +58,13 @@ if command -v patchelf >/dev/null 2>&1; then
   done
 fi
 
-# launcher, desktop entry, icon, license
+# launchers, desktop entries, icon, license
+# `voice` = Tk UI (unchanged), `voice-gtk` = the new GTK 4 UI
 install -Dm755 "$PROJ/packaging/voice.launcher" "$STAGE/usr/bin/voice"
+install -Dm755 "$PROJ/packaging/voice-gtk.launcher" "$STAGE/usr/bin/voice-gtk"
 install -Dm644 "$PROJ/packaging/voice.desktop"  "$STAGE/usr/share/applications/voice.desktop"
+install -Dm644 "$PROJ/packaging/voice-gtk.desktop" \
+  "$STAGE/usr/share/applications/voice-gtk.desktop"
 install -Dm644 "$PROJ/Assets/VoiceIcon.png" \
   "$STAGE/usr/share/icons/hicolor/256x256/apps/voice.png"
 install -Dm644 "$PROJ/LICENSE" "$STAGE/usr/share/doc/voice/copyright"
@@ -74,7 +82,7 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: Theologos Kalotrapezis <kalotrapezis@gmail.com>
 Installed-Size: $INSTALLED_KB
-Depends: python3, python3-tk, python3-gi, gir1.2-ayatanaappindicator3-0.1, pipewire-bin, pulseaudio-utils, poppler-utils, xdotool, xclip, wmctrl
+Depends: python3, python3-tk, python3-gi, gir1.2-gtk-4.0, gir1.2-ayatanaappindicator3-0.1, pipewire-bin, pulseaudio-utils, poppler-utils, xdotool, xclip, wmctrl
 Recommends: ydotool, wl-clipboard, libreoffice
 Homepage: https://github.com/kalotrapezis/Voice
 Description: Greek voice keyboard & read-aloud (offline STT/TTS)
@@ -83,6 +91,9 @@ Description: Greek voice keyboard & read-aloud (offline STT/TTS)
  types into any app, and read-aloud (text-to-speech via Piper). Includes a
  voice-remote target picker, continuous hands-free mode, a mini floating bar,
  a system-tray icon, meeting transcription and global shortcuts.
+ .
+ Ships two interfaces: "voice" (the original Tk UI, with the system tray) and
+ "voice-gtk" (a GTK 4 rewrite with a sidebar, page stack and native theming).
  .
  Works on KDE Plasma (Wayland) and on X11 desktops such as Cinnamon (Linux
  Mint). The large speech models (~0.6 GB) are not shipped in the package; they
