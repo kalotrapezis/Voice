@@ -7,8 +7,9 @@
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-# upstream version 0.0.5, packaging revision "a" (post-tag dictation/icon fixes)
-VERSION="${VERSION:-0.0.5-a}"
+# upstream version 0.0.5, packaging revision "b" (desktop-disruption, duplicate
+# text, mini-bar and theme-icon fixes)
+VERSION="${VERSION:-0.0.5-b}"
 ARCH="${ARCH:-amd64}"
 PKG="voice_${VERSION}_${ARCH}"
 OUT="$PROJ/build/deb"

@@ -120,10 +120,17 @@ def meeting_dir():
 
 
 def transcribe(path, lang):
-    """Run whisper.cpp on a wav file and return cleaned text ('' on failure)."""
+    """Run whisper.cpp on a wav file and return cleaned text ('' on failure).
+
+    whisper saturates every core; at normal priority it can starve ydotool
+    mid-keystroke, and if the stall between the V press and release exceeds
+    the compositor's autorepeat delay the paste types twice. `nice` keeps the
+    input path responsive while costing whisper almost nothing."""
     try:
         res = subprocess.run(
-            [WHISPER, "-m", MODEL, "-f", path, "-l", lang, "-t", "8", "-nt", "-np"],
+            ["nice", "-n", "10",
+             WHISPER, "-m", MODEL, "-f", path, "-l", lang, "-t", "8",
+             "-nt", "-np"],
             capture_output=True, text=True, timeout=120)
         return clean_transcript(res.stdout)
     except Exception:

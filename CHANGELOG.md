@@ -2,6 +2,81 @@
 
 All notable changes to VOICE are documented here.
 
+## v0.0.5-b — desktop disruption, duplicate text, mini bar
+
+A bug-fix revision of the GTK 4 UI, found by using it. Two of these had been
+"fixed" before from the wrong diagnosis; this round added a persistent log
+first and let the evidence pick the cause.
+
+### Added
+
+- **Flight-recorder log** at `~/.cache/voicekbd/voice-gtk.log`. Launched from
+  a hotkey or the app menu there is no terminal, so failures used to leave no
+  trace at all. Every stage of the dictation chain now logs: each captured
+  audio segment with a fingerprint (so a segment captured twice is visible at
+  a glance), every whisper submit/result, every paste with its success flag,
+  every hotkey command, and the process id — so a stray second instance can't
+  hide. Rotates at 2 MB.
+- **Stop icons** (`stop-black.svg` / `stop-white.svg`). The dictation mic, the
+  meeting mic, the mini-bar mic and the read-aloud Play button now turn into a
+  stop square while active and back when idle, instead of staying a mic and
+  leaving you guessing whether it's recording.
+
+### Fixed
+
+- **VOICE disrupted the whole desktop while running** — context menus closed
+  by themselves, text selections flickered about once a second, and menu items
+  wouldn't take a hover. This was reported as "the app is left-clicking
+  everywhere", and had previously been blamed on input injection. It was not
+  input at all: the clipboard watcher polled by shelling out to `wl-paste`
+  every second, and on KDE Wayland *each invocation briefly maps a window*.
+  Every one of those windows broke the pointer grab that keeps a menu open and
+  reset selection/hover state, once per second, for as long as VOICE ran. The
+  GTK app now watches the clipboard through GTK's own in-process
+  `Gdk.Clipboard::changed` signal: no polling, no subprocesses, no windows,
+  and it does nothing at all until the clipboard actually changes.
+  (The Tk app still uses the polling watcher.)
+- **Dictated text arriving twice, in continuous mode.** The earlier fix
+  addressed a real overlapping-takes bug but not this one. The log showed
+  VOICE pasting each phrase exactly once, which pointed at the destination:
+  when VOICE's own window had focus, the paste landed in its own Δοκιμή box —
+  which already displays the recognised text — so the phrase appeared twice,
+  adjacent and identical. Delivery is now skipped while VOICE itself is
+  focused; the text is still copied and shown.
+- **Paste keystrokes could interleave.** Two phrases finishing close together
+  each sent Ctrl+V through `ydotool`; one could press V while the other still
+  held Ctrl. Delivery is now serialised behind a lock.
+- **whisper could starve the input path.** Transcription saturates every core,
+  and at normal priority it could stall a keystroke between press and release.
+  It now runs at `nice -n 10`, which keeps input responsive and costs
+  transcription almost nothing.
+- **Dictation flooded the clipboard history.** Delivering text copies it, and
+  the watcher recorded every phrase as a new clipboard item. The watcher is
+  now told to ignore the app's own copies.
+- **The mini bar stretched across the screen.** A multi-line clipboard item (a
+  copied transcript) was rendered with all its lines, and because the window
+  is not resizable it grew to fit. Previews are now flattened to one line and
+  capped with `max-width-chars` — an ellipsized label still *requests* its full
+  natural width without that.
+- **The mini bar's ✕ dragged the window instead of closing it.** The drag
+  gesture was attached to the whole bar, so `begin_move()` stole the pointer
+  grab from every button on it. Dragging is now bound to the ⠿ handle alone,
+  which also gets a grab cursor.
+- **The mini bar's speaker had no stop.** A second click now stops playback,
+  and the button shows a stop square while reading.
+- **Icons were black on dark themes.** Icon files are named for the theme they
+  serve, which is easy to invert by accident (`Dark-Clipboard` is the *white*
+  one). Icons are now requested by role — mic, speaker, meeting, clip, gear,
+  pin, stop — and resolved to the right variant from the theme's background
+  luminance.
+- **A second instance could run.** A development flag left the app
+  non-unique. Because closing the window collapses to the mini bar and keeps
+  the app alive, launching it again started a twin with its own recorder,
+  whisper and delivery pipeline on the same microphone — every phrase typed
+  twice, and one instance's stop button could not reach the other's. The app
+  is single-instance again, and quitting now stops every capture and playback
+  process so nothing outlives it.
+
 ## v0.0.5 — GTK 4 interface
 
 The interface was rebuilt in **GTK 4**, from a PixelRuller design
