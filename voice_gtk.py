@@ -22,6 +22,8 @@ import sys
 import time
 import queue
 import shutil
+import hashlib
+import logging
 import datetime
 import tempfile
 import threading
@@ -40,8 +42,65 @@ import platform_io
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON = os.path.join(HERE, "Assets", "VoiceIcon.png")
+
+# ---------------------------------------------------------------- logging
+# Persistent log — launched from a hotkey or the menu there is no terminal,
+# so without this file bugs leave no trace to diagnose.
+LOG_PATH = os.path.expanduser("~/.cache/voicekbd/voice-gtk.log")
+LOG = logging.getLogger("voice")
+
+
+def _setup_log():
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    try:                                   # keep the file from growing forever
+        if os.path.getsize(LOG_PATH) > 2_000_000:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+    except OSError:
+        pass
+    h = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    h.setFormatter(logging.Formatter(
+        "%(asctime)s %(threadName)-12s %(message)s"))
+    LOG.addHandler(h)
+    LOG.setLevel(logging.INFO)
+
+
+def _pcm_id(pcm):
+    """Short fingerprint of an audio segment, to spot duplicates in the log."""
+    return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
 VERSION = "0.0.5"
+
+
+_DARK = None
+
+
+def dark_theme():
+    """True when the active GTK theme is dark (bg luminance < 0.5)."""
+    global _DARK
+    if _DARK is None:
+        ok, c = Gtk.Label().get_style_context().lookup_color(
+            "theme_bg_color")
+        _DARK = bool(ok) and (
+            0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue) < 0.5
+    return _DARK
+
+
+# icon set names by role: (light-theme variant, dark-theme variant) — the
+# files are named for the theme they serve, so "Dark-Clipboard" is white ink
+_ICONS = {
+    "mic": ("mic-on-black", "mic-on-white"),
+    "speaker": ("Speaker-black-on", "Speaker-white-on"),
+    "meeting": ("meeting-black", "meeting-white"),
+    "clip": ("Light-Clipboard", "Dark-Clipboard"),
+    "gear": ("Gear-Darklines", "Gear-white"),
+    "pin": ("pin-dark", "pin-white"),
+    "stop": ("stop-black", "stop-white"),
+}
+
+
+def icon_for(role):
+    light, dark = _ICONS[role]
+    return dark if dark_theme() else light
 
 
 def svg_icon(name, size=20):
@@ -158,7 +217,8 @@ window.voice-mini {
   border-radius: 38px;
 }
 window.voice-mini.expanded { border-radius: 20px; }
-.mini-round { border-radius: 9999px; min-width: 48px; min-height: 48px; }
+.mini-round { border-radius: 9999px; min-width: 44px; min-height: 44px; }
+.mini-handle { padding: 4px 6px; }
 .mini-round.destructive-action, .mini-round.record-red {
   background: #e01b24; color: #ffffff;
 }
@@ -259,6 +319,8 @@ class Recorder:
         return self.thread is not None and self.thread.is_alive()
 
     def start(self, dev, on_segment=None, on_level=None, vad=True):
+        LOG.info("recorder.start dev=%r vad=%s (was running=%s)",
+                 dev, vad, self.running)
         self.stop_event = threading.Event()
         self.buffer = bytearray()
         self.proc = subprocess.Popen(vk.raw_capture_cmd(dev),
@@ -281,6 +343,7 @@ class Recorder:
                 on_level(min(1.0, vk.frame_rms(chunk) / 4000.0))
 
     def stop(self):
+        LOG.info("recorder.stop")
         if self.stop_event:
             self.stop_event.set()
         proc, self.proc = self.proc, None
@@ -330,6 +393,8 @@ class Transcriber:
             return self._gen
 
     def submit(self, pcm, lang, on_text):
+        LOG.info("transcriber.submit gen=%d pcm=%s", self.generation,
+                 _pcm_id(pcm))
         self.q.put((self.generation, pcm, lang, on_text))
 
     def cancel(self):
@@ -362,20 +427,112 @@ class Transcriber:
                 except OSError:
                     pass
             # re-check: "stop" may have been pressed while whisper ran
+            LOG.info("transcriber.result gen=%d/%d pcm=%s txt=%r",
+                     gen, self.generation, _pcm_id(pcm), txt[:60])
             if txt and gen == self.generation:
                 GLib.idle_add(on_text, txt)
 
 
-def deliver_text(txt, target_key=None, do_paste=True):
+class GdkClipWatcher:
+    """Event-driven clipboard history via Gdk.Clipboard's `changed` signal.
+
+    Replaces the polling ClipWatcher for the GTK app. The old watcher shelled
+    out to wl-paste/xclip once per second, and on KDE Wayland every wl-paste
+    invocation maps a brief invisible window — which dismisses open context
+    menus, makes text selections flicker, and resets hover states across the
+    whole desktop, once per second. In-process Gdk reads do none of that, and
+    only run when the clipboard actually changes."""
+
+    def __init__(self, store):
+        self.store = store
+        self.paused = False              # feature toggle: skip capture
+        self._ignore = {}                # text -> expiry; app's own copies
+        self._last = None
+        self.clip = Gdk.Display.get_default().get_clipboard()
+        self.clip.connect("changed", self._changed)
+
+    def start(self):
+        return True                      # signal-driven; nothing to start
+
+    def ignore(self, text, ttl=10):
+        now = time.time()
+        self._ignore = {t: e for t, e in self._ignore.items() if e > now}
+        self._ignore[text] = now + ttl
+
+    # ---- capture
+    def _changed(self, clip):
+        if self.paused:
+            return
+        formats = clip.get_formats()
+        if formats.contain_gtype(Gdk.Texture.__gtype__):
+            clip.read_texture_async(None, self._got_texture)
+        elif formats.contain_gtype(GObject.TYPE_STRING) or \
+                formats.contain_mime_type("text/plain;charset=utf-8") or \
+                formats.contain_mime_type("text/plain"):
+            clip.read_text_async(None, self._got_text)
+
+    def _got_text(self, clip, result):
+        try:
+            text = clip.read_text_finish(result)
+        except GLib.Error:
+            return
+        if not text or not text.strip():
+            return
+        exp = self._ignore.get(text)
+        if exp and exp > time.time():
+            return                       # the app's own copy — don't record
+        cid = hashlib.sha256(text.encode()).hexdigest()[:16]
+        if cid == self._last:
+            return
+        self._last = cid
+        self.store.add({"id": cid, "kind": "text", "text": text})
+
+    def _got_texture(self, clip, result):
+        try:
+            texture = clip.read_texture_finish(result)
+        except GLib.Error:
+            return
+        os.makedirs(clipmod.CACHE_DIR, exist_ok=True)
+        data = texture.save_to_png_bytes().get_data()
+        cid = hashlib.sha256(data).hexdigest()[:16]
+        if cid == self._last:
+            return
+        self._last = cid
+        raw = os.path.join(clipmod.CACHE_DIR, cid + ".png")
+        if not os.path.exists(raw):
+            texture.save_to_png(raw)
+        thumb = os.path.join(clipmod.CACHE_DIR, cid + "_t.png")
+        if not os.path.exists(thumb):
+            clipmod.make_thumbnail(raw, thumb)
+        self.store.add({"id": cid, "kind": "image", "path": raw,
+                        "thumb": thumb if os.path.exists(thumb) else None,
+                        "text": "🖼 εικόνα από το πρόχειρο"})
+
+
+_deliver_lock = threading.Lock()
+
+
+def deliver_text(txt, target_key=None, do_paste=True, watcher=None):
     """Copy to clipboard and paste into the target window (or wherever focus
-    is if no target). Mirrors the Tkinter app's delivery path."""
-    platform_io.clip_copy(txt)
-    if not do_paste:
-        return
-    if target_key:
-        platform_io.activate_target(target_key)
-        time.sleep(0.35)
-    platform_io.send_paste()
+    is if no target). Mirrors the Tkinter app's delivery path.
+
+    Serialized: two phrases finishing close together must never interleave
+    their ydotool keystrokes (Ctrl held by one while the other presses V
+    pastes twice). The watcher is told to skip our own copy, so dictation
+    doesn't flood the clipboard history with every phrase."""
+    with _deliver_lock:
+        LOG.info("deliver.begin txt=%r target=%r paste=%s",
+                 txt[:60], target_key, do_paste)
+        if watcher is not None:
+            watcher.ignore(txt)
+        platform_io.clip_copy(txt)
+        if not do_paste:
+            return
+        if target_key:
+            platform_io.activate_target(target_key)
+            time.sleep(0.35)
+        ok = platform_io.send_paste()
+        LOG.info("deliver.paste ok=%s txt=%r", ok, txt[:30])
 
 
 LANGS = {"Ελληνικά": "el", "English": "en"}
@@ -387,6 +544,36 @@ SHORTCUTS = [  # (config key, row label, socket command, default combo)
     ("SC_CLIPMINI", "📋  Πρόχειρο (mini πάνω από όλα)", "clipmini",
      "Ctrl+Alt+Z"),
 ]
+
+
+APP_ID = "io.github.kalotrapezis.voice"
+
+
+def ensure_dev_icon():
+    """Source-checkout runs have no .desktop file, so KWin/taskbars can't map
+    our Wayland app-id to an icon. Install a user-level desktop entry + icon
+    once (the package install provides these system-wide under /usr)."""
+    if SELF.startswith("/usr/"):
+        return
+    apps = os.path.expanduser("~/.local/share/applications")
+    icon_dir = os.path.expanduser(
+        "~/.local/share/icons/hicolor/256x256/apps")
+    desk = os.path.join(apps, f"{APP_ID}.desktop")
+    icon = os.path.join(icon_dir, f"{APP_ID}.png")
+    try:
+        if not os.path.exists(icon):
+            os.makedirs(icon_dir, exist_ok=True)
+            shutil.copyfile(ICON, icon)
+        os.makedirs(apps, exist_ok=True)
+        with open(desk, "w") as f:
+            f.write("[Desktop Entry]\nType=Application\n"
+                    "Name=VOICE — Φωνή (GTK)\n"
+                    f'Exec={sys.executable} "{SELF}"\n'
+                    f"Icon={APP_ID}\nTerminal=false\n"
+                    "Categories=Utility;Accessibility;\n"
+                    "NoDisplay=false\nStartupNotify=true\n")
+    except OSError:
+        pass
 
 
 def send_ctl(action):
@@ -589,7 +776,7 @@ class DictationPage(Gtk.Box):
         self.win_keys = [None]
         self.target_drop = dropdown(["Ενεργό παράθυρο (focus)"])
         GLib.idle_add(self._refresh_targets)
-        gear = svg_button("Gear-Darklines", 18, ("flat", "circular"))
+        gear = svg_button(icon_for("gear"), 18, ("flat", "circular"))
         gear.connect("clicked", lambda *_: TargetDialog(self.win).present())
         out_card.append(settings_row(
             "Στόχος", "Πού πάει το κείμενο που υπαγορεύεις",
@@ -657,11 +844,13 @@ class DictationPage(Gtk.Box):
     def _start_ui(self, status):
         self.t0 = time.monotonic()
         self.status.set_label(status)
+        self.record_btn.set_child(svg_icon("stop-white", 26))
         self._tick_id = GLib.timeout_add(100, self._tick)
 
     def _stop_ui(self, status="Έτοιμο"):
         self.t0 = None
         self.status.set_label(status)
+        self.record_btn.set_child(svg_icon("mic-on-white", 28))
         self.levels.extend([0.0] * self.levels.maxlen)
         self.wave.queue_draw()
 
@@ -691,9 +880,12 @@ class DictationPage(Gtk.Box):
             self._start_ui("Ομιλία σε εξέλιξη…")
 
     def _on_segment(self, pcm):
+        LOG.info("dict.segment pcm=%s", _pcm_id(pcm))
         self.transcriber.submit(pcm, self._lang(), self._got_text)
 
     def _got_text(self, txt):
+        LOG.info("dict.got_text txt=%r deliver=%s", txt[:60],
+                 self.win.settings().deliver_enabled())
         if not self.rec.running:
             self.status.set_label("Έτοιμο")
         if not txt:
@@ -704,9 +896,13 @@ class DictationPage(Gtk.Box):
             old = ""
         buf.set_text((old + " " + txt).strip())
         if self.win.settings().deliver_enabled():
-            threading.Thread(target=deliver_text,
-                             args=(txt, self.target_key()),
-                             daemon=True).start()
+            # if VOICE itself is focused, the paste would land in our own
+            # test box — which already shows the text — doubling every phrase
+            paste = not self.win.is_active()
+            threading.Thread(
+                target=deliver_text, args=(txt, self.target_key()),
+                kwargs={"watcher": self.win.app.watcher, "do_paste": paste},
+                daemon=True).start()
 
     def _on_mode(self, sw, _):
         if self.rec.running:
@@ -818,6 +1014,9 @@ class ReadPage(Gtk.Box):
             self.text_view.get_buffer().set_text(text)
 
     def _on_play(self, btn):
+        if self.win.app.tts.speaking:      # the play button doubles as stop
+            self.win.app.tts.stop()
+            return
         buf = self.text_view.get_buffer()
         bounds = buf.get_selection_bounds()
         if bounds:
@@ -833,6 +1032,11 @@ class ReadPage(Gtk.Box):
         msgs = {"playing": "Διαβάζω…", "done": "Τέλος ανάγνωσης",
                 "stopped": "Σταμάτησε", "no-text": "Δεν υπάρχει κείμενο"}
         self.status.set_label(msgs.get(state, "Έτοιμο"))
+        if state == "playing":
+            self.play_btn.set_child(svg_icon("stop-white", 22))
+        else:
+            self.play_btn.set_child(Gtk.Image.new_from_icon_name(
+                "media-playback-start-symbolic"))
         return False
 
     def _on_stop(self, btn):
@@ -932,6 +1136,7 @@ class MeetingPage(Gtk.Box):
         if self.rec.running:
             self.rec.stop()
             self.transcriber.cancel()
+            self.rec_btn.set_child(svg_icon("mic-on-white", 24))
             self._export()
             return
         st = self.win.settings()
@@ -943,6 +1148,7 @@ class MeetingPage(Gtk.Box):
             self.transcript.remove(c)
         self.lines = []
         self.t0 = time.monotonic()
+        self.rec_btn.set_child(svg_icon("stop-white", 22))
         self.rec.start(dev, on_segment=self._on_segment,
                        on_level=self.levels.append, vad=True)
         GLib.timeout_add(200, self._tick)
@@ -1046,7 +1252,7 @@ class ClipboardPage(Gtk.Box):
             aa.set_tooltip_text("Ανάγνωση")
             aa.connect("clicked", lambda *_, it=item: self._read(it))
             acts.append(aa)
-        pin = svg_button("pin-dark", 16, ("flat",))
+        pin = svg_button(icon_for("pin"), 16, ("flat",))
         pin.set_tooltip_text("Καρφίτσωμα")
         if item.get("pinned"):
             pin.add_css_class("suggested-action")
@@ -1503,6 +1709,7 @@ class MiniWindow(Gtk.Window):
     def __init__(self, app, main_win):
         super().__init__(application=app, decorated=False, resizable=False,
                          title="VOICE Mini")
+        self.set_icon_name("voice")
         self.main_win = main_win
         self.add_css_class("voice-mini")
         self.expanded = False
@@ -1514,6 +1721,7 @@ class MiniWindow(Gtk.Window):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         handle = Gtk.Label(label="⠿")
         dim(handle, small=False)
+        handle.add_css_class("mini-handle")
         bar.append(handle)
 
         self.mic_btn = svg_button("mic-on-white", 22,
@@ -1521,11 +1729,11 @@ class MiniWindow(Gtk.Window):
         self.mic_btn.connect("clicked", self._mini_mic)
         bar.append(self.mic_btn)
 
-        self.speak_btn = svg_button("Speaker-black-on", 22, ("mini-round",))
+        self.speak_btn = svg_button(icon_for("speaker"), 22, ("mini-round",))
         self.speak_btn.connect("clicked", self._mini_speak)
         bar.append(self.speak_btn)
 
-        self.clip_btn = svg_button("Light-Clipboard", 22, ("mini-round",))
+        self.clip_btn = svg_button(icon_for("clip"), 22, ("mini-round",))
         self.clip_btn.connect("clicked", self._toggle_clip)
         bar.append(self.clip_btn)
 
@@ -1562,10 +1770,13 @@ class MiniWindow(Gtk.Window):
         self.clip_rev.set_child(clip_box)
         outer.append(self.clip_rev)
 
-        # drag anywhere on the bar to move the window
+        # drag the ⠿ handle to move the window — the handle only, or the
+        # gesture's begin_move() steals the pointer grab and every button on
+        # the bar (including ✕) drags instead of clicking
         drag = Gtk.GestureDrag()
         drag.connect("drag-begin", self._drag_begin)
-        bar.add_controller(drag)
+        handle.add_controller(drag)
+        handle.set_cursor(Gdk.Cursor.new_from_name("grab"))
 
         self.set_child(outer)
 
@@ -1590,8 +1801,13 @@ class MiniWindow(Gtk.Window):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             row.add_css_class("mini-clip-row")
             prefix = "🖼 " if it.get("kind") == "image" else ""
-            lbl = Gtk.Label(label=prefix + it.get("text", ""), xalign=0,
-                            hexpand=True,
+            # single-line preview: flatten newlines (a copied transcript is
+            # one item, not a wall), and max_width_chars caps the label's
+            # NATURAL width — without it an ellipsized label still asks for
+            # the full text width and the mini window balloons to fit
+            flat = " ".join(it.get("text", "").split())
+            lbl = Gtk.Label(label=prefix + flat, xalign=0,
+                            hexpand=True, max_width_chars=38,
                             ellipsize=Pango.EllipsizeMode.END)
             if it.get("text", "").startswith(("http://", "https://")):
                 lbl.add_css_class("link-text")
@@ -1599,7 +1815,7 @@ class MiniWindow(Gtk.Window):
             click = Gtk.GestureClick()
             click.connect("released", lambda *_, i=it: clipmod.recopy(i))
             row.add_controller(click)
-            pin = svg_button("pin-dark", 14, ("flat",))
+            pin = svg_button(icon_for("pin"), 14, ("flat",))
             if it.get("pinned"):
                 pin.add_css_class("suggested-action")
             pin.connect("clicked",
@@ -1611,15 +1827,26 @@ class MiniWindow(Gtk.Window):
     def _mini_mic(self, btn):
         page = self.main_win.pages["dictation"]
         page._on_record(btn)
-        self.status.set_label("Εγγραφή…" if page.rec.running else "Έτοιμο")
+        rec = page.rec.running
+        self.mic_btn.set_child(
+            svg_icon("stop-white" if rec else "mic-on-white", 22))
+        self.status.set_label("Εγγραφή…" if rec else "Έτοιμο")
 
     def _mini_speak(self, btn):
+        tts = self.main_win.app.tts
+        if tts.speaking:                 # second click = stop
+            tts.stop()
+            return
         st = self.main_win.settings()
         text = platform_io.clip_read(primary=True) or platform_io.clip_read()
-        self.main_win.app.tts.speak(
-            text, st.voice_model(), st.speed(),
-            lambda s: self.status.set_label(
-                "Διαβάζω…" if s == "playing" else "Έτοιμο"))
+        tts.speak(text, st.voice_model(), st.speed(), self._speak_state)
+
+    def _speak_state(self, state):
+        playing = state == "playing"
+        self.speak_btn.set_child(svg_icon(
+            icon_for("stop") if playing else icon_for("speaker"), 22))
+        self.status.set_label("Διαβάζω…" if playing else "Έτοιμο")
+        return False
 
     def _toggle_clip(self, btn):
         self.expanded = not self.expanded
@@ -1644,14 +1871,15 @@ class MiniWindow(Gtk.Window):
 
 # ---------------------------------------------------------------- main win
 class MainWindow(Gtk.ApplicationWindow):
-    PAGES = [("dictation", "Υπαγόρευση", "mic-on-black"),
-             ("read", "Ανάγνωση", "Speaker-black-on"),
-             ("meeting", "Σύσκεψη", "meeting-black"),
-             ("clipboard", "Πρόχειρο", "Light-Clipboard")]
+    PAGES = [("dictation", "Υπαγόρευση", "mic"),
+             ("read", "Ανάγνωση", "speaker"),
+             ("meeting", "Σύσκεψη", "meeting"),
+             ("clipboard", "Πρόχειρο", "clip")]
 
     def __init__(self, app):
         super().__init__(application=app, title="VOICE",
                          default_width=1200, default_height=760)
+        self.set_icon_name("voice")     # X11 titlebar/taskbar icon
         self.add_css_class("voice-main")
         self.app = app
 
@@ -1773,10 +2001,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _nav_row(self, key, label, icon):
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        if icon == "settings-gear":
-            box.append(svg_icon("Gear-Darklines", 18))
-        else:
-            box.append(svg_icon(icon, 18))
+        role = "gear" if icon == "settings-gear" else icon
+        box.append(svg_icon(icon_for(role), 18))
         box.append(Gtk.Label(label=label, xalign=0))
         row.set_child(box)
         row.page_key = key
@@ -1806,19 +2032,47 @@ class MainWindow(Gtk.ApplicationWindow):
 
 class VoiceApp(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.kalotrapezis.voice",
-                         flags=Gio.ApplicationFlags.NON_UNIQUE)
+        # Single-instance is load-bearing: with close-to-mini the app keeps
+        # running after its window closes, and a NON_UNIQUE second launch
+        # would run a second recorder + whisper + delivery pipeline on the
+        # same mic — every phrase typed twice, and "stop" in one instance
+        # leaves the other pasting into windows forever.
+        super().__init__(application_id="io.github.kalotrapezis.voice")
         self.mini = None
+
+    def do_shutdown(self):
+        """Stop every capture/playback process so nothing outlives the app —
+        an orphaned recorder kept transcribing and pasting after exit."""
+        for w in self.get_windows():
+            if isinstance(w, MainWindow):
+                for key in ("dictation", "meeting"):
+                    page = w.pages.get(key)
+                    try:
+                        if page and page.rec.running:
+                            page.rec.stop()
+                            page.transcriber.cancel()
+                    except Exception:
+                        pass
+        try:
+            self.tts.stop()
+        except Exception:
+            pass
+        Gtk.Application.do_shutdown(self)
 
     def do_activate(self):
         _load_css()
         win = self.props.active_window
         if not win:
+            ensure_dev_icon()
             self.tts = Tts()
             self.store = clipmod.ClipStore()
-            self.watcher = clipmod.ClipWatcher(self.store)
-            self.watcher.start()
+            self.watcher = GdkClipWatcher(self.store)
             self._start_ctl_server()
+            # keep the desktop's global shortcuts pointing at this copy
+            cfg = vk.load_config()
+            if any(cfg.get(k) for k, *_ in SHORTCUTS):
+                threading.Thread(target=register_shortcuts, args=(cfg,),
+                                 daemon=True).start()
             win = MainWindow(self)
             for name, cb in [("mini", self.show_mini),
                              ("settings", lambda *_: win.show_page("settings")),
@@ -1853,6 +2107,7 @@ class VoiceApp(Gtk.Application):
             GLib.idle_add(self._ctl_dispatch, cmd)
 
     def _ctl_dispatch(self, cmd):
+        LOG.info("ctl.command %r", cmd)
         win = self.props.active_window or (
             self.get_windows()[0] if self.get_windows() else None)
         main = win if isinstance(win, MainWindow) else None
@@ -1896,9 +2151,6 @@ class VoiceApp(Gtk.Application):
         # Always-on-top: GTK4 has no set_keep_above; X11 → wmctrl fallback,
         # Wayland → KWin window rule for "VOICE Mini".
         GLib.timeout_add(300, self._keep_above_x11)
-        # Always-on-top: GTK4 has no set_keep_above; on KDE/X11 fall back to
-        # wmctrl, on Wayland use a KWin window rule for "VOICE Mini".
-        GLib.timeout_add(300, self._keep_above_x11)
 
     def _keep_above_x11(self):
         if os.environ.get("XDG_SESSION_TYPE") == "x11":
@@ -1908,6 +2160,8 @@ class VoiceApp(Gtk.Application):
 
 
 if __name__ == "__main__":
+    _setup_log()
+    LOG.info("main pid=%d argv=%r", os.getpid(), sys.argv[1:])
     # `voice_gtk.py talk|read|show|clip|clipmini` → forward to the running
     # instance (this is what the registered global shortcuts execute)
     if len(sys.argv) > 1 and sys.argv[1] in (

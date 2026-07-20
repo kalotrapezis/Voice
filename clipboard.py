@@ -272,6 +272,14 @@ class ClipWatcher:
         self.paused = False              # feature toggle: skip capture, keep thread
         self._last = None
         self._thread = None
+        self._ignore = {}                # text -> expiry; app's own copies
+
+    def ignore(self, text, ttl=10):
+        """Skip the next capture of this exact text (the app copied it itself
+        — e.g. dictation delivery — and it shouldn't pollute the history)."""
+        now = time.time()
+        self._ignore = {t: e for t, e in self._ignore.items() if e > now}
+        self._ignore[text] = now + ttl
 
     def start(self):
         if not (platform_io._has("xclip") or platform_io._has("xsel")
@@ -290,6 +298,9 @@ class ClipWatcher:
                 entry = _capture()
                 if entry and entry["id"] != self._last:
                     self._last = entry["id"]
+                    exp = self._ignore.get(entry.get("text", ""))
+                    if exp and exp > time.time():
+                        continue        # the app's own copy — don't record it
                     self.store.add(entry)
             except Exception:
                 pass
