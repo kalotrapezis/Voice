@@ -69,7 +69,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta8"
+VERSION = "0.0.6~beta9"
 
 
 _DARK = None
@@ -1387,7 +1387,6 @@ class NotepadPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.win = win
         self.suggestions = []
-        self.space_completes = False
 
         self.rec = Recorder()
         self.transcriber = Transcriber()
@@ -1464,10 +1463,6 @@ class NotepadPage(Gtk.Box):
         self._update_counts()
         prefix, _, _ = self._word_before_cursor()
         self.suggestions = predictor().suggest(prefix) if prefix else []
-        # Space completes only a half-typed word. Type "καλά" in full and
-        # Space must stay a space, or every short word grows a tail.
-        self.space_completes = bool(self.suggestions) and \
-            not predictor().is_word(prefix)
         self._show_chips()
 
     def _show_chips(self):
@@ -1478,8 +1473,7 @@ class NotepadPage(Gtk.Box):
             return
         for i, word in enumerate(self.suggestions):
             b = Gtk.Button(label=word)
-            b.add_css_class("suggested-action" if i == 0 and
-                            self.space_completes else "kbd-chip")
+            b.add_css_class("suggested-action" if i == 0 else "kbd-chip")
             b.connect("clicked", lambda _b, w=word: self._accept(w))
             self.chips.append(b)
         self._point_at_caret()
@@ -1509,11 +1503,12 @@ class NotepadPage(Gtk.Box):
             self.suggestions = []
             self._show_chips()
             return True
-        if keyval == Gdk.KEY_space and self.suggestions \
-                and self.space_completes \
-                and not (state & Gdk.ModifierType.CONTROL_MASK):
+        # Tab takes the suggestion. Space used to, which meant a fully typed
+        # word could grow a tail on an ordinary space bar press; Tab has no
+        # such second meaning while you are writing.
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and self.suggestions:
             self._accept(self.suggestions[0])
-            return True                    # swallow the space we just added
+            return True                    # no literal tab in the note
         return False
 
     # ---- counts

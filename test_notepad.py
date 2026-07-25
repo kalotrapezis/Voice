@@ -5,7 +5,8 @@ the cursor, what Space replaces, and the counts.
 """
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gtk
 
 import voice_gtk as g
 
@@ -43,13 +44,15 @@ def main():
     p._on_changed()
     assert p.suggestions == []
 
-    # Space completes a half-typed word, but never a word already complete
+    # Tab inserts the first suggestion; space stays a plain space
     p.buf.set_text("θα γράψ")
     p._on_changed()
-    assert p.space_completes, p.suggestions
-    p.buf.set_text("είναι καλά")
+    first = p.suggestions[0]
+    assert p._on_key(None, Gdk.KEY_Tab, 0, 0) is True
+    assert p.buf.get_text(*p.buf.get_bounds(), False) == f"θα {first} "
+    p.buf.set_text("θα γράψ")
     p._on_changed()
-    assert p.suggestions and not p.space_completes, p.suggestions
+    assert p._on_key(None, Gdk.KEY_space, 0, 0) is False   # not swallowed
 
     # counts, with the selection in parentheses
     p.buf.set_text("ένα δύο τρία")
