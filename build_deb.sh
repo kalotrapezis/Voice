@@ -40,6 +40,7 @@ install -m644 "$PROJ/platform_io.py"    "$APP/"
 install -m644 "$PROJ/clipboard.py"      "$APP/"
 install -m644 "$PROJ/predict.py"        "$APP/"
 install -m644 "$PROJ/llm.py"            "$APP/"
+install -m644 "$PROJ/chatmem.py"        "$APP/"
 install -Dm644 "$PROJ/data/el_freq.txt" "$APP/data/el_freq.txt"
 install -Dm644 "$PROJ/Assets/VoiceIcon.png" "$APP/Assets/VoiceIcon.png"
 # icon set used by the GTK 4 UI

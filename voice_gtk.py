@@ -38,6 +38,7 @@ from gi.repository import Gtk, Gdk, Gio, GLib, GObject, Pango
 import voice_keyboard as vk
 import predict
 import llm
+import chatmem
 import read_aloud as ra
 import clipboard as clipmod
 import platform_io
@@ -70,7 +71,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6"
+VERSION = "0.0.7~beta6"
 
 
 _DARK = None
@@ -241,6 +242,16 @@ window.voice-mini {
 }
 window.voice-mini.expanded { border-radius: 14px; }
 /* half the old height: the round buttons set the bar's thickness */
+/* three kinds of text, three colours: what you wrote as the character, what
+   the machine remembers, and the conversation itself */
+.chat-system {
+  background: alpha(#e5a50a, 0.18); border-radius: 8px; padding: 6px 10px;
+}
+.chat-memory {
+  background: alpha(#9141ac, 0.18); border-radius: 8px; padding: 6px 10px;
+}
+.chat-note { font-size: 11px; }
+.chat-history row { border-radius: 6px; }
 .chat-bubble { padding: 8px 12px; border-radius: 12px; }
 .chat-me { background: alpha(@theme_selected_bg_color, 0.18); }
 .chat-bob { background: shade(@theme_bg_color, 0.97); }
@@ -752,6 +763,28 @@ def kwin_keep_above(rule_id, enabled):
 
 
 _PREDICTOR = None
+
+
+def chat_name():
+    """Who you are talking to — set by the persona chips, editable in the
+    config. Nothing says "Bob" unless this does."""
+    return vk.load_config().get("CHAT_NAME") or llm.DEFAULT_NAME
+
+
+def save_chat_name(name):
+    cfg = vk.load_config()
+    cfg["CHAT_NAME"] = name.strip() or llm.DEFAULT_NAME
+    vk.save_config(cfg)
+
+
+def chat_temp():
+    """0 is repeatable and dry, 1.2 is loose. The character prompts want a
+    little room, so the default sits in the middle."""
+    try:
+        return max(0.0, min(1.4, float(vk.load_config().get("CHAT_TEMP",
+                                                           "0.7"))))
+    except ValueError:
+        return 0.7
 
 
 def chat_system():
@@ -1788,16 +1821,54 @@ class ChatPage(Gtk.Box):
     def __init__(self, win):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.win = win
-        self.chat = llm.Chat(system=chat_system())
+        self.store = chatmem.Store()
+        self.chat = llm.Chat(system=self._system_with_memory(),
+                             temperature=chat_temp())
+        self.current = self.store.new_chat()
         self.busy = False
 
         clear = Gtk.Button(label="Καθαρισμός")
         clear.connect("clicked", lambda *_: self.reset())
-        self.append(page_header("Bob", clear))
+        mem_btn = Gtk.Button(label="Μνήμη")
+        mem_btn.connect("clicked", lambda *_: MemoryDialog(self).present())
+        sys_btn = Gtk.Button(label="Οδηγίες")
+        sys_btn.connect("clicked",
+                        lambda *_: self.win.show_page("settings"))
+        self.window_bar = Gtk.LevelBar(min_value=0, max_value=1)
+        self.window_bar.set_size_request(120, -1)
+        self.window_bar.set_valign(Gtk.Align.CENTER)
+        self.window_lbl = dim(Gtk.Label(label=""), small=False)
+        self.title = Gtk.Label(label=chat_name(), xalign=0, hexpand=True)
+        self.title.add_css_class("page-title")
+        hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        hdr.add_css_class("page-header")
+        hdr.append(self.title)
+        for w in (self.window_lbl, self.window_bar, mem_btn, sys_btn, clear):
+            w.set_valign(Gtk.Align.CENTER)
+            hdr.append(w)
+        self.append(hdr)
 
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
                        margin_top=14, margin_bottom=14,
                        margin_start=26, margin_end=26)
+
+        # history down the side: each past conversation, newest first
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        side.set_size_request(210, -1)
+        new_btn = Gtk.Button(label="＋  Νέα συνομιλία")
+        new_btn.connect("clicked", lambda *_: self.start_new())
+        side.append(new_btn)
+        self.history = Gtk.ListBox()
+        self.history.add_css_class("chat-history")
+        self.history.connect("row-activated", self._on_history)
+        hist_card = Gtk.Box(vexpand=True)
+        hist_card.add_css_class("voice-card")
+        hist_card.append(scrolled(self.history))
+        side.append(hist_card)
+        body.append(side)
+
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                        hexpand=True)
         self.thread_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                                   spacing=8, margin_top=10, margin_bottom=10,
                                   margin_start=10, margin_end=10)
@@ -1805,26 +1876,175 @@ class ChatPage(Gtk.Box):
         card.add_css_class("voice-card")
         self.scroll = scrolled(self.thread_box)
         card.append(self.scroll)
-        body.append(card)
+        right.append(card)
+        body.append(right)
+        self.right_box = right
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.entry = Gtk.Entry(hexpand=True,
-                               placeholder_text="Γράψε στον Bob…")
+                               placeholder_text=f"Γράψε στον {chat_name()}…")
         self.entry.connect("activate", lambda *_: self._send())
         send = Gtk.Button(label="Αποστολή")
         send.add_css_class("suggested-action")
         send.connect("clicked", lambda *_: self._send())
         row.append(self.entry)
         row.append(send)
-        body.append(row)
+        self.right_box.append(row)
 
         self.spinner = Gtk.Spinner()
         self.status = dim(Gtk.Label(label="", xalign=0), small=False)
         foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         foot.append(self.spinner)
         foot.append(self.status)
-        body.append(foot)
+        self.right_box.append(foot)
         self.append(body)
+        self.refresh_history()
+        self._update_window_bar()
+
+    # ---- memory + history
+    def _system_with_memory(self):
+        """The character, plus two words per past conversation."""
+        base = chat_system()
+        mem = self.store.memory_text()
+        if not mem:
+            return base
+        # "Θυμάσαι…" made it greet every new chat by reciting the file. It is
+        # background knowledge: use it when it helps, never announce it.
+        return (f"{base}\n\n[Παρασκήνιο, ΜΗΝ το αναφέρεις και ΜΗΝ το "
+                f"απαριθμείς: {mem}. Χρησιμοποίησέ το μόνο αν βοηθάει την "
+                f"απάντηση, σαν να το ήξερες ήδη. Μη χαιρετάς σαν να "
+                f"συνεχίζεις παλιά κουβέντα.]")
+
+    def rename(self):
+        """Follow a persona change without a restart."""
+        self.title.set_label(chat_name())
+        self.entry.set_placeholder_text(f"Γράψε στον {chat_name()}…")
+        row = self.win.nav_rows.get("chat")
+        if row is not None:
+            label = row.get_child().get_last_child()
+            label.set_label(f"Chat ({chat_name()})")
+
+    def refresh_history(self):
+        while (r := self.history.get_first_child()):
+            self.history.remove(r)
+        for chat in self.store.chats[:40]:
+            if not chat["turns"] and chat["id"] != self.current["id"]:
+                continue                   # empty stubs are not history
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                          margin_top=6, margin_bottom=6,
+                          margin_start=8, margin_end=8)
+            title = Gtk.Label(label=chat["title"], xalign=0, wrap=True,
+                              max_width_chars=18, lines=2,
+                              ellipsize=Pango.EllipsizeMode.END)
+            box.append(title)
+            if chat.get("note"):
+                note = Gtk.Label(label="🧠 " + chat["note"], xalign=0)
+                note.add_css_class("chat-note")
+                box.append(dim(note))
+            line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            box.set_hexpand(True)
+            line.append(box)
+            drop = Gtk.Button(icon_name="user-trash-symbolic")
+            drop.add_css_class("flat")
+            drop.set_valign(Gtk.Align.CENTER)
+            drop.set_tooltip_text("Διαγραφή συζήτησης")
+            drop.connect("clicked", self._delete_chat, chat["id"])
+            line.append(drop)
+            row.set_child(line)
+            row.chat_id = chat["id"]
+            self.history.append(row)
+
+    def _delete_chat(self, btn, chat_id):
+        """Drop one conversation. Its two-word note stays in memory — you
+        deleted a transcript, not the fact that you talked about bread."""
+        self.store.drop(chat_id)
+        self.store.save()
+        if chat_id == self.current["id"]:
+            self._blank_chat()
+        else:
+            self.refresh_history()
+
+    def _on_history(self, listbox, row):
+        if getattr(row, "chat_id", None) == self.current["id"]:
+            return
+        self.finalise(then=lambda: self._open(row.chat_id))
+
+    def _open(self, chat_id):
+        chat = self.store.get(chat_id)
+        if chat is None:
+            return
+        self.current = chat
+        self.chat = llm.Chat(system=self._system_with_memory(),
+                             temperature=chat_temp())
+        self.chat.turns = [tuple(t) for t in chat["turns"]]
+        while (c := self.thread_box.get_first_child()):
+            self.thread_box.remove(c)
+        self._memory_banner()
+        for role, text in self.chat.turns:
+            self._bubble("user" if role == "user" else "bob", text)
+        self._update_window_bar()
+
+    def start_new(self):
+        self.finalise(then=self._blank_chat)
+
+    def _blank_chat(self):
+        self.current = self.store.new_chat()
+        self.chat = llm.Chat(system=self._system_with_memory(),
+                             temperature=chat_temp())
+        while (c := self.thread_box.get_first_child()):
+            self.thread_box.remove(c)
+        self._memory_banner()
+        self.refresh_history()
+        self._update_window_bar()
+
+    def _memory_banner(self):
+        """Two coloured lines at the top: what Bob is, and what he remembers.
+        Different colours because they are different kinds of text — the
+        character you wrote, and the memory the machine built."""
+        sys_lbl = Gtk.Label(label="⚙ " + chat_system().split("\n")[0][:90],
+                            xalign=0, wrap=True)
+        sys_lbl.add_css_class("chat-system")
+        self.thread_box.append(sys_lbl)
+        mem = self.store.memory_text()
+        if mem:
+            mem_lbl = Gtk.Label(label="🧠 " + mem[:160], xalign=0, wrap=True)
+            mem_lbl.add_css_class("chat-memory")
+            self.thread_box.append(mem_lbl)
+
+    def finalise(self, then=None):
+        """Store the conversation and squeeze two words out of it.
+
+        Called when you switch chats, leave the tab or quit — never while
+        typing, since it costs a model call."""
+        self.store.update(self.current["id"], self.chat.turns)
+        if not self.chat.turns:
+            self.store.save()
+            if then:
+                then()
+            return
+        chat_id = self.current["id"]
+        self._working(True, "Αποθηκεύω τη μνήμη…")
+
+        def work():
+            if llm.server_running():
+                self.store.remember(chat_id)
+            self.store.save()
+            GLib.idle_add(self._finalised, then)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finalised(self, then):
+        self._working(False)
+        self.refresh_history()
+        if then:
+            then()
+        return False
+
+    def _update_window_bar(self):
+        used = self.chat._tokens()
+        left = max(0, llm.CHAT_WINDOW - used)
+        self.window_bar.set_value(min(1.0, used / llm.CHAT_WINDOW))
+        self.window_lbl.set_label(f"{left} tokens ελεύθερα")
 
     def _working(self, on, message=""):
         self.spinner.set_spinning(on)
@@ -1832,10 +2052,15 @@ class ChatPage(Gtk.Box):
 
     # ---- conversation
     def reset(self):
+        """Empty this conversation — the memory of older ones stays."""
         self.chat.reset()
-        self.chat.system = chat_system()
+        self.chat.system = self._system_with_memory()
+        self.store.update(self.current["id"], [])
+        self.store.save()
         while (c := self.thread_box.get_first_child()):
             self.thread_box.remove(c)
+        self._memory_banner()
+        self._update_window_bar()
         self._working(False)
 
     def _bubble(self, who, text):
@@ -1866,8 +2091,13 @@ class ChatPage(Gtk.Box):
         self.entry.set_text("")
         self.busy = True
         self._bubble("user", text)
+        # the model reads Greek without accents badly — it is a 4B model and
+        # unaccented words tokenise into something else entirely. Accents are
+        # restored on the way out; guessing at misspellings is not, since
+        # "αθηνα" would become "φθηνά" and the answer would follow it.
+        text = predictor().accent_text(text)
         reply = self._bubble("bob", "…")
-        self._working(True, "Ο Bob γράφει…" if llm.server_running()
+        self._working(True, f"Ο {chat_name()} γράφει…" if llm.server_running()
                       else "Φορτώνει το μοντέλο… (2,4 GB, μία φορά)")
 
         def work():
@@ -1888,6 +2118,10 @@ class ChatPage(Gtk.Box):
         self.busy = False
         self._working(False)
         bubble.set_label(text or "…δεν κατάφερα να απαντήσω, συγγνώμη.")
+        self.store.update(self.current["id"], self.chat.turns)
+        self.store.save()
+        self.refresh_history()
+        self._update_window_bar()
         self._scroll_down()
 
 
@@ -1958,20 +2192,55 @@ class SettingsPage(Gtk.Box):
         bob = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                       margin_top=12, margin_bottom=12,
                       margin_start=14, margin_end=12)
+        # hexpand/vexpand are load-bearing: without them the text view keeps
+        # its natural size — a thin strip in the top-left corner of the card —
+        # and clicking anywhere else in the white area did nothing at all, so
+        # the box looked broken and never showed a caret
         self.sys_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                      left_margin=8, right_margin=8,
-                                     top_margin=6, bottom_margin=6)
+                                     top_margin=6, bottom_margin=6,
+                                     hexpand=True, vexpand=True)
         self.sys_view.get_buffer().set_text(chat_system())
         frame = Gtk.Box()
         frame.add_css_class("voice-card")
-        frame.append(self.sys_view)
-        self.sys_view.set_size_request(-1, 110)
+        frame.append(scrolled(self.sys_view))
+        frame.set_size_request(-1, 120)
         bob.append(dim(Gtk.Label(
-            label="Οδηγίες χαρακτήρα — τι είναι ο Bob και πώς απαντά",
+            label="Οδηγίες χαρακτήρα — ποιος είναι και πώς απαντά",
             xalign=0)))
         bob.append(frame)
+        # a flow box, not a row: five characters do not fit on one line at
+        # every window width
+        self.temp_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 0.0, 1.4, 0.05)
+        self.temp_scale.set_value(chat_temp())
+        self.temp_scale.set_hexpand(True)
+        self.temp_val = dim(Gtk.Label(label=f"{chat_temp():.2f}"), small=False)
+        self.temp_scale.connect("value-changed", self._temp_changed)
+        temp_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        temp_row.append(Gtk.Label(label="Δημιουργικότητα", xalign=0))
+        temp_row.append(self.temp_scale)
+        temp_row.append(self.temp_val)
+        bob.append(temp_row)
+        bob.append(dim(Gtk.Label(
+            label="Χαμηλή = σταθερές, στεγνές απαντήσεις · υψηλή = πιο "
+                  "ελεύθερες και απρόβλεπτες", xalign=0, wrap=True)))
+
+        chips = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,
+                            column_spacing=6, row_spacing=6,
+                            max_children_per_line=4)
+        for name, label, prompt in llm.PERSONAS:
+            chip = Gtk.Button(label=label)
+            chip.add_css_class("kbd-chip")
+            chip.connect("clicked", self._pick_persona, name, prompt)
+            chips.append(chip)
+        bob.append(chips)
+
         acts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                        halign=Gtk.Align.END)
+        edit_btn = Gtk.Button(label="Επεξεργασία")
+        edit_btn.connect("clicked",
+                         lambda *_: self.sys_view.grab_focus())
         default_btn = Gtk.Button(label="Προεπιλογή")
         default_btn.connect("clicked", self._reset_system)
         clear_btn = Gtk.Button(label="Καθαρισμός συνομιλίας")
@@ -1979,13 +2248,14 @@ class SettingsPage(Gtk.Box):
         save_btn = Gtk.Button(label="Αποθήκευση")
         save_btn.add_css_class("suggested-action")
         save_btn.connect("clicked", self._save_system)
-        for b in (default_btn, clear_btn, save_btn):
+        for b in (edit_btn, default_btn, clear_btn, save_btn):
             acts.append(b)
         bob.append(acts)
         self.bob_status = dim(Gtk.Label(label="", xalign=0))
         bob.append(self.bob_status)
-        body.append(group("🤖  Bob (συνομιλία)",
-                          "Ο χαρακτήρας του και η μνήμη της κουβέντας", bob))
+        body.append(group("🤖  Συνομιλία",
+                          "Ο χαρακτήρας του βοηθού και η μνήμη της κουβέντας",
+                          bob))
 
         body.append(group("🧠  Διόρθωση AI",
                           "Το βαρύ μοντέλο που διαβάζει ολόκληρη πρόταση", ai))
@@ -2058,7 +2328,7 @@ class SettingsPage(Gtk.Box):
         self.feature_toggles = {}
         feats = [("dictation", "🎤  Υπαγόρευση"), ("read", "📖  Ανάγνωση"),
                  ("meeting", "📝  Σύσκεψη"), ("notepad", "📝  Σημειωματάριο"),
-                 ("chat", "💬  Chat (Bob)"),
+                 ("chat", "💬  Chat"),
                  ("clipboard", "📋  Πρόχειρο")]
         for i, (key, label) in enumerate(feats):
             sw = Gtk.Switch(active=True)
@@ -2249,16 +2519,35 @@ class SettingsPage(Gtk.Box):
         buf = self.sys_view.get_buffer()
         return buf.get_text(*buf.get_bounds(), False).strip()
 
+    def _temp_changed(self, scale):
+        value = scale.get_value()
+        self.temp_val.set_label(f"{value:.2f}")
+        cfg = vk.load_config()
+        cfg["CHAT_TEMP"] = f"{value:.2f}"
+        vk.save_config(cfg)
+        page = self.win.pages.get("chat")
+        if page:
+            page.chat.temperature = value
+
+    def _pick_persona(self, btn, name, prompt):
+        """A ready-made character. The name travels with it, so the tab and
+        the placeholder stop saying someone else's."""
+        self.sys_view.get_buffer().set_text(prompt)
+        save_chat_name(name)
+        self._save_system(btn)
+
     def _save_system(self, btn):
         text = self._system_text()
         save_chat_system(text)
         page = self.win.pages.get("chat")
         if page:                           # takes effect on the next message
-            page.chat.system = text or llm.DEFAULT_SYSTEM
-        self.bob_status.set_label("Αποθηκεύτηκε")
+            page.chat.system = page._system_with_memory()
+            page.rename()
+        self.bob_status.set_label(f"Αποθηκεύτηκε — {chat_name()}")
 
     def _reset_system(self, btn):
         self.sys_view.get_buffer().set_text(llm.DEFAULT_SYSTEM)
+        save_chat_name(llm.DEFAULT_NAME)
         self._save_system(btn)
 
     def _clear_chat(self, btn):
@@ -2415,6 +2704,56 @@ class TargetDialog(VoiceDialog):
         ok.add_css_class("suggested-action")
         ok.connect("clicked", lambda *_: self.close())
         self.action_bar(cancel, ok)
+
+
+class MemoryDialog(VoiceDialog):
+    """What Bob remembers: two words per past conversation, plus the folded
+    sentence they turn into once there are too many."""
+
+    def __init__(self, page):
+        super().__init__(page.win, "Η μνήμη του Bob", 520)
+        self.page = page
+        store = page.store
+
+        if store.facts or store.facts_general:
+            shown = " · ".join(x for x in [store.facts_general] + store.facts
+                               if x)
+            facts = Gtk.Label(label="👤 " + shown,
+                              xalign=0, wrap=True)
+            facts.add_css_class("chat-memory")
+            self.box.append(facts)
+        if store.summary:
+            lbl = Gtk.Label(label="🧠 " + store.summary, xalign=0, wrap=True)
+            lbl.add_css_class("chat-memory")
+            self.box.append(lbl)
+        notes = store.notes[-25:]
+        if notes:
+            wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            for note in reversed(notes):
+                n = Gtk.Label(label="· " + note, xalign=0, wrap=True)
+                n.add_css_class("chat-note")
+                wrap.append(n)
+            self.box.append(wrap)
+        if not (store.summary or notes or store.facts or
+                store.facts_general):
+            self.box.append(dim(Gtk.Label(
+                label="Άδεια — κουβέντιασε και θα κρατήσει δύο λέξεις από "
+                      "κάθε συζήτηση, μαζί με όσα στοιχεία πεις για σένα.",
+                xalign=0, wrap=True), small=False))
+
+        forget = Gtk.Button(label="Διαγραφή μνήμης")
+        forget.add_css_class("destructive-action")
+        forget.connect("clicked", self._forget)
+        close = Gtk.Button(label="Κλείσιμο")
+        close.connect("clicked", lambda *_: self.close())
+        self.action_bar(close, leading=forget)
+
+    def _forget(self, btn):
+        self.page.store.forget()
+        self.page.store.save()
+        self.page.chat.system = self.page._system_with_memory()
+        self.page.refresh_history()
+        self.close()
 
 
 class InfoDialog(VoiceDialog):
@@ -2787,7 +3126,7 @@ class MainWindow(Gtk.ApplicationWindow):
              ("read", "Ανάγνωση", "speaker"),
              ("meeting", "Σύσκεψη", "meeting"),
              ("notepad", "Σημειωματάριο", "notepad"),
-             ("chat", "Chat (Bob)", "chat"),
+             ("chat", "Chat", "chat"),
              ("clipboard", "Πρόχειρο", "clip")]
 
     def __init__(self, app):
@@ -2945,11 +3284,17 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _release_model(self, page_key):
         """Leaving Bob and the notepad frees the weights. Nobody expects a
-        chat tab they walked away from to keep 2.4 GB resident."""
+        chat tab they walked away from to keep 2.4 GB resident — but the
+        conversation is summarised into memory first, while the model that
+        does the summarising is still up."""
         if page_key in self.AI_PAGES:
             return
         chat = self.pages.get("chat")
         if chat is not None and chat.busy:        # a reply is still streaming
+            return
+        if chat is not None and chat.chat.turns:
+            chat.finalise(then=lambda: threading.Thread(
+                target=llm.stop_server, daemon=True).start())
             return
         threading.Thread(target=llm.stop_server, daemon=True).start()
 
@@ -2998,6 +3343,16 @@ class VoiceApp(Gtk.Application):
             self.tts.stop()
         except Exception:
             pass
+        for w in self.get_windows():      # last words into memory, then out
+            chat = getattr(w, "pages", {}).get("chat") if hasattr(w, "pages") \
+                else None
+            if chat is not None and chat.chat.turns:
+                try:
+                    chat.store.update(chat.current["id"], chat.chat.turns)
+                    chat.store.remember(chat.current["id"])
+                    chat.store.save()
+                except Exception:
+                    pass
         llm.stop_server()                 # 2.4 GB must not outlive the app
         Gtk.Application.do_shutdown(self)
 
