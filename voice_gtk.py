@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta10"
+VERSION = "0.0.6~beta11"
 
 
 _DARK = None
@@ -1388,6 +1388,7 @@ class NotepadPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.win = win
         self.suggestions = []
+        self.picked = -1                   # which chip Tab has walked to
 
         self.rec = Recorder()
         self.transcriber = Transcriber()
@@ -1469,6 +1470,7 @@ class NotepadPage(Gtk.Box):
         self._update_counts()
         prefix, _, _ = self._word_before_cursor()
         self.suggestions = predictor().suggest(prefix) if prefix else []
+        self.picked = -1                   # a fresh word highlights nothing
         self._show_chips()
 
     def _show_chips(self):
@@ -1479,20 +1481,31 @@ class NotepadPage(Gtk.Box):
             return
         for i, word in enumerate(self.suggestions):
             b = Gtk.Button(label=word)
-            b.add_css_class("suggested-action" if i == 0 else "kbd-chip")
+            b.add_css_class("suggested-action" if i == self.picked
+                            else "kbd-chip")
             b.connect("clicked", lambda _b, w=word: self._accept(w))
             self.chips.append(b)
         self._point_at_caret()
         self.pop.popup()
 
+    # the popover sits this far below the caret: pinned to the caret box
+    # itself it covered the line being written
+    CARET_GAP = 16
+
     def _point_at_caret(self):
-        """Park the popover on the caret's own rectangle inside the view."""
+        """Park the popover under the caret, clear of the current line."""
         it = self.buf.get_iter_at_mark(self.buf.get_insert())
         r = self.view.get_iter_location(it)
         x, y = self.view.buffer_to_window_coords(
             Gtk.TextWindowType.WIDGET, r.x, r.y)
-        self.pop.set_pointing_to(Gdk.Rectangle(
-            x=x, y=y, width=max(r.width, 1), height=max(r.height, 1)))
+        # Gdk.Rectangle is a boxed struct: PyGObject ignores constructor
+        # kwargs (silently, with all fields left at 0), so the popover was
+        # being pointed at the widget's top-left corner all along
+        rect = Gdk.Rectangle()
+        rect.x, rect.y = x, y
+        rect.width = max(r.width, 1)
+        rect.height = max(r.height, 1) + self.CARET_GAP
+        self.pop.set_pointing_to(rect)
 
     def _accept(self, word):
         prefix, start, end = self._word_before_cursor()
@@ -1500,22 +1513,36 @@ class NotepadPage(Gtk.Box):
             return
         self.buf.delete(start, end)
         self.buf.insert_at_cursor(word + " ")
-        self.suggestions = []
-        self._show_chips()
+        self._dismiss()
         self.view.grab_focus()
 
     def _on_key(self, ctl, keyval, keycode, state):
-        if keyval == Gdk.KEY_Escape and self.suggestions:
-            self.suggestions = []
-            self._show_chips()
+        """Tab walks the suggestions, Enter takes one, Esc drops them.
+
+        Nothing is inserted until Enter, so Tab is safe to lean on: you can
+        look at all three and still end up typing your own word."""
+        if not self.suggestions:
+            return False
+        if keyval == Gdk.KEY_Escape:
+            self._dismiss()
             return True
-        # Tab takes the suggestion. Space used to, which meant a fully typed
-        # word could grow a tail on an ordinary space bar press; Tab has no
-        # such second meaning while you are writing.
-        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and self.suggestions:
-            self._accept(self.suggestions[0])
-            return True                    # no literal tab in the note
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab):
+            step = -1 if keyval == Gdk.KEY_ISO_Left_Tab else 1
+            if self.picked < 0:            # -1 + -1 would land on the middle
+                self.picked = 0 if step > 0 else len(self.suggestions) - 1
+            else:
+                self.picked = (self.picked + step) % len(self.suggestions)
+            self._show_chips()
+            return True                    # never a literal tab in the note
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.picked >= 0:
+            self._accept(self.suggestions[self.picked])
+            return True                    # and no newline either
         return False
+
+    def _dismiss(self):
+        self.suggestions = []
+        self.picked = -1
+        self._show_chips()
 
     # ---- counts
     def _update_counts(self):

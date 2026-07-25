@@ -6,7 +6,7 @@ the cursor, what Space replaces, and the counts.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 import voice_gtk as g
 
@@ -44,15 +44,37 @@ def main():
     p._on_changed()
     assert p.suggestions == []
 
-    # Tab inserts the first suggestion; space stays a plain space
+    # Tab walks the suggestions without touching the text, Enter takes one
     p.buf.set_text("θα γράψ")
     p._on_changed()
-    first = p.suggestions[0]
+    assert p.picked == -1                                  # nothing preselected
     assert p._on_key(None, Gdk.KEY_Tab, 0, 0) is True
-    assert p.buf.get_text(*p.buf.get_bounds(), False) == f"θα {first} "
+    assert p.picked == 0
+    assert p.buf.get_text(*p.buf.get_bounds(), False) == "θα γράψ"  # untouched
+    assert p._on_key(None, Gdk.KEY_Tab, 0, 0) is True
+    assert p.picked == 1
+    second = p.suggestions[1]
+    assert p._on_key(None, Gdk.KEY_Return, 0, 0) is True
+    assert p.buf.get_text(*p.buf.get_bounds(), False) == f"θα {second} "
+    assert p.suggestions == [] and p.picked == -1
+
+    # Shift+Tab walks back, and wraps around the end of the list
     p.buf.set_text("θα γράψ")
     p._on_changed()
-    assert p._on_key(None, Gdk.KEY_space, 0, 0) is False   # not swallowed
+    assert p._on_key(None, Gdk.KEY_ISO_Left_Tab, 0, 0) is True
+    assert p.picked == len(p.suggestions) - 1
+
+    # Enter with nothing picked stays a newline, space stays a space
+    p.buf.set_text("θα γράψ")
+    p._on_changed()
+    assert p._on_key(None, Gdk.KEY_Return, 0, 0) is False
+    assert p._on_key(None, Gdk.KEY_space, 0, 0) is False
+
+    # Esc drops the suggestions and leaves the half-typed word alone
+    assert p._on_key(None, Gdk.KEY_Escape, 0, 0) is True
+    assert p.suggestions == []
+    assert p.buf.get_text(*p.buf.get_bounds(), False) == "θα γράψ"
+    assert p._on_key(None, Gdk.KEY_Tab, 0, 0) is False     # nothing to walk
 
     # counts, with the selection in parentheses
     p.buf.set_text("ένα δύο τρία")
@@ -72,7 +94,45 @@ def main():
     assert p.buf.get_text(*p.buf.get_bounds(), False) == "καλημέρα όλα καλά", \
         p.buf.get_text(*p.buf.get_bounds(), False)
 
+    popover_follows_caret()
     print("ok")
+
+
+def popover_follows_caret():
+    """The suggestion popover must sit ON the caret and below the line.
+
+    Needs a mapped window and one main-loop turn: before that the text view
+    has no allocation and every coordinate reads back zero — which is also
+    how the Gdk.Rectangle kwargs bug hid, since it left the rect at 0,0,0,0.
+    """
+    win = Gtk.Window(default_width=600, default_height=400)
+    p = g.NotepadPage(win)
+    win.set_child(p)
+    win.present()
+    loop = GLib.MainLoop()
+    state = {}
+
+    def once():
+        p.buf.set_text("θα γράψ")
+        p._on_changed()
+        ok, rect = p.pop.get_pointing_to()
+        caret = p.view.get_iter_location(
+            p.buf.get_iter_at_mark(p.buf.get_insert()))
+        state.update(ok=ok, rect=rect, caret=caret)
+        loop.quit()
+        return False
+
+    GLib.timeout_add(600, once)
+    GLib.timeout_add_seconds(20, loop.quit)
+    loop.run()
+    win.destroy()
+    if not state:                          # no display: nothing to check
+        return
+    ok, rect, caret = state["ok"], state["rect"], state["caret"]
+    assert ok, "popover has no pointing rect"
+    assert rect.x == caret.x, (rect.x, caret.x)          # follows the cursor
+    assert rect.height == caret.height + g.NotepadPage.CARET_GAP, \
+        (rect.height, caret.height)
 
 
 if __name__ == "__main__":
