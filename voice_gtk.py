@@ -656,6 +656,55 @@ def list_mic_sources():
     return devs
 
 
+KWIN_RULES = os.path.expanduser("~/.config/kwinrulesrc")
+# rule id -> (description, window title it matches). KWin is the only thing on
+# Plasma that can put a window above others: GTK 4 dropped set_keep_above and
+# Wayland gives a client no say in stacking, so "Πάντα μπροστά" and the mini
+# bar are dead on this session unless we write the rule ourselves.
+KWIN_ABOVE_RULES = {
+    "voice-main-above": ("VOICE — πάντα μπροστά", "VOICE"),
+    "voice-mini-above": ("VOICE Mini — πάντα μπροστά", "VOICE Mini"),
+}
+
+
+def on_plasma():
+    return "kde" in (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+
+
+def kwin_keep_above(rule_id, enabled):
+    """Add or drop one KWin 'keep above' rule, then make KWin re-read them.
+
+    Edits ~/.config/kwinrulesrc in place with configparser so any rule the
+    user made by hand survives untouched."""
+    if not on_plasma():
+        return
+    import configparser
+    desc, title = KWIN_ABOVE_RULES[rule_id]
+    cp = configparser.RawConfigParser()
+    cp.optionxform = str                      # KWin's keys are case-sensitive
+    cp.read(KWIN_RULES, encoding="utf-8")
+    if enabled:
+        cp[rule_id] = {"Description": desc, "above": "true", "aboverule": "2",
+                       "title": title, "titlematch": "1"}
+    elif cp.has_section(rule_id):
+        cp.remove_section(rule_id)
+    ids = [s for s in cp.sections() if s != "General"]
+    if not cp.has_section("General"):
+        cp.add_section("General")
+    cp["General"]["count"] = str(len(ids))
+    cp["General"]["rules"] = ",".join(ids)
+    os.makedirs(os.path.dirname(KWIN_RULES), exist_ok=True)
+    with open(KWIN_RULES, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=False)
+    for qdbus in ("qdbus6", "qdbus"):
+        try:
+            subprocess.run([qdbus, "org.kde.KWin", "/KWin", "reconfigure"],
+                           capture_output=True, timeout=5)
+            break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+
 def dim(label, small=True):
     label.add_css_class("dim-label")
     if small:
@@ -2118,13 +2167,16 @@ class MainWindow(Gtk.ApplicationWindow):
         return False
 
     def apply_topmost(self):
-        """Keep-above for the main window. GTK4 has no API for this: X11 →
-        wmctrl; Wayland → needs a KWin window rule (title 'VOICE')."""
+        """Keep-above for the main window. GTK 4 has no API for it: X11 →
+        wmctrl, Plasma → a KWin rule we write ourselves (note: on Wayland the
+        client cannot ask, so without the rule the switch did nothing)."""
+        on = self.settings().top_toggle.get_active()
         if os.environ.get("XDG_SESSION_TYPE") == "x11":
-            mode = "add" if self.settings().top_toggle.get_active() \
-                else "remove"
-            subprocess.run(["wmctrl", "-r", "VOICE", "-b", f"{mode},above"],
+            subprocess.run(["wmctrl", "-r", "VOICE", "-b",
+                            f"{'add' if on else 'remove'},above"],
                            capture_output=True)
+        else:
+            kwin_keep_above("voice-main-above", on)
         return False
 
     def settings(self):
@@ -2303,14 +2355,15 @@ class VoiceApp(Gtk.Application):
         if expand_clip and not self.mini.expanded:
             self.mini._toggle_clip(None)
         self.mini.present()
-        # Always-on-top: GTK4 has no set_keep_above; X11 → wmctrl fallback,
-        # Wayland → KWin window rule for "VOICE Mini".
-        GLib.timeout_add(300, self._keep_above_x11)
+        # The mini bar floats over everything by definition — no setting.
+        GLib.timeout_add(300, self._keep_mini_above)
 
-    def _keep_above_x11(self):
+    def _keep_mini_above(self):
         if os.environ.get("XDG_SESSION_TYPE") == "x11":
             subprocess.run(["wmctrl", "-r", "VOICE Mini", "-b",
                             "add,above"], capture_output=True)
+        else:
+            kwin_keep_above("voice-mini-above", True)
         return False
 
 
