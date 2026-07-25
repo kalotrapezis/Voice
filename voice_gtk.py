@@ -69,7 +69,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta7"
+VERSION = "0.0.6~beta8"
 
 
 _DARK = None
@@ -212,6 +212,20 @@ window.voice-main { background: @theme_bg_color; }
 .clip-card { border-radius: 12px; padding: 12px 8px 12px 14px; }
 .link-text { color: @theme_selected_bg_color; }
 
+/* mini bar sizes: the round buttons set the pill thickness, so each size is
+   their box plus matching padding (icon sizes live in MINI_SIZES) */
+.voice-mini.size-small .mini-round,
+.voice-mini.size-small button.flat { min-width: 22px; min-height: 22px; }
+.voice-mini.size-small label { font-size: 11px; }
+.voice-mini.size-medium .mini-round,
+.voice-mini.size-medium button.flat { min-width: 32px; min-height: 32px; }
+.voice-mini.size-medium label { font-size: 12px; }
+.voice-mini.size-large .mini-round,
+.voice-mini.size-large button.flat { min-width: 44px; min-height: 44px; }
+.voice-mini.size-small { border-radius: 14px; }
+.voice-mini.size-medium { border-radius: 20px; }
+.voice-mini.size-large { border-radius: 38px; }
+
 window.voice-mini {
   background: shade(@theme_bg_color, 0.99);
   border: 1px solid alpha(currentColor, 0.2);
@@ -219,11 +233,9 @@ window.voice-mini {
 }
 window.voice-mini.expanded { border-radius: 14px; }
 /* half the old height: the round buttons set the bar's thickness */
-.mini-round { border-radius: 9999px; min-width: 22px; min-height: 22px;
-              padding: 0; }
+.mini-round { border-radius: 9999px; padding: 0; }
 .mini-handle { padding: 0 4px; font-size: 10px; }
-.voice-mini button.flat { min-width: 22px; min-height: 22px; padding: 0; }
-.voice-mini label { font-size: 11px; }
+.voice-mini button.flat { padding: 0; }
 .mini-round.destructive-action, .mini-round.record-red {
   background: #e01b24; color: #ffffff;
 }
@@ -666,6 +678,22 @@ KWIN_ABOVE_RULES = {
     "voice-main-above": ("VOICE — πάντα μπροστά", "VOICE"),
     "voice-mini-above": ("VOICE Mini — πάντα μπροστά", "VOICE Mini"),
 }
+
+
+# mini bar sizes: (icon px, outer margin, inner spacing). "large" is the
+# original bar, "small" the slim one — medium sits between them.
+MINI_SIZES = {
+    "small": (13, 2, 4),
+    "medium": (18, 6, 8),
+    "large": (22, 10, 10),
+}
+MINI_SIZE_LABELS = [("small", "Μικρό"), ("medium", "Μεσαίο"),
+                    ("large", "Μεγάλο")]
+
+
+def mini_size():
+    key = vk.load_config().get("MINI_SIZE", "medium")
+    return key if key in MINI_SIZES else "medium"
 
 
 def on_plasma():
@@ -1590,6 +1618,10 @@ class SettingsPage(Gtk.Box):
             "Mini λειτουργία",
             "Όταν κλείνεις το παράθυρο, εμφανίζεται μια μικρή μπάρα "
             "(🎤 🔊 📋) πάνω από όλα", self.mini_toggle))
+        self.mini_size_drop = dropdown([l for _, l in MINI_SIZE_LABELS])
+        gen.append(settings_row(
+            "Μέγεθος mini μπάρας",
+            "Μεγάλο είναι η αρχική μπάρα, μικρό η λεπτή", self.mini_size_drop))
         self.top_toggle = Gtk.Switch()
         gen.append(settings_row(
             "Πάντα μπροστά",
@@ -1733,6 +1765,11 @@ class SettingsPage(Gtk.Box):
             if value in values:
                 drop.set_selected(values.index(value))
         self.mini_toggle.set_active(cfg.get("MINI", "1") == "1")
+        keys = [k for k, _ in MINI_SIZE_LABELS]
+        self.mini_size_drop.set_selected(
+            keys.index(mini_size()) if mini_size() in keys else 1)
+        self.mini_size_drop.connect("notify::selected",
+                                    lambda *_: self._mini_size_changed())
         self.top_toggle.set_active(cfg.get("TOPMOST", "0") == "1")
         self.deliver_toggle.set_active(cfg.get("DELIVER", "1") == "1")
         sel(self.lang_drop, cfg.get("LANG", "el"), list(LANGS.values()))
@@ -1777,6 +1814,18 @@ class SettingsPage(Gtk.Box):
                                  lambda *_: self._persist())
         self.top_toggle.connect("notify::active",
                                 lambda *_: self.win.apply_topmost())
+
+    def _mini_size_changed(self):
+        """Persist, then rebuild the bar — size is baked in at construction."""
+        cfg = vk.load_config()
+        cfg["MINI_SIZE"] = MINI_SIZE_LABELS[
+            self.mini_size_drop.get_selected()][0]
+        vk.save_config(cfg)
+        app = self.win.app
+        if app.mini is not None and app.mini.get_visible():
+            app.mini.close()
+            app.mini = None
+            app.show_mini()
 
     def _persist(self):
         cfg = vk.load_config()
@@ -2156,28 +2205,31 @@ class MiniWindow(Gtk.Window):
         self.set_icon_name("voice")
         self.main_win = main_win
         self.add_css_class("voice-mini")
+        self.size_key = mini_size()
+        self.add_css_class("size-" + self.size_key)
+        ico, pad, gap = MINI_SIZES[self.size_key]
         self.expanded = False
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
-                        margin_top=2, margin_bottom=2,
-                        margin_start=6, margin_end=4)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=gap - 2,
+                        margin_top=pad, margin_bottom=pad,
+                        margin_start=pad + 4, margin_end=pad + 2)
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=gap)
         handle = Gtk.Label(label="⠿")
         dim(handle, small=False)
         handle.add_css_class("mini-handle")
         bar.append(handle)
 
-        self.mic_btn = svg_button("mic-on-white", 13,
+        self.mic_btn = svg_button("mic-on-white", ico,
                                   ("destructive-action", "mini-round"))
         self.mic_btn.connect("clicked", self._mini_mic)
         bar.append(self.mic_btn)
 
-        self.speak_btn = svg_button(icon_for("speaker"), 13, ("mini-round",))
+        self.speak_btn = svg_button(icon_for("speaker"), ico, ("mini-round",))
         self.speak_btn.connect("clicked", self._mini_speak)
         bar.append(self.speak_btn)
 
-        self.clip_btn = svg_button(icon_for("clip"), 13, ("mini-round",))
+        self.clip_btn = svg_button(icon_for("clip"), ico, ("mini-round",))
         self.clip_btn.connect("clicked", self._toggle_clip)
         bar.append(self.clip_btn)
 
@@ -2272,8 +2324,9 @@ class MiniWindow(Gtk.Window):
         page = self.main_win.pages["dictation"]
         page._on_record(btn)
         rec = page.rec.running
-        self.mic_btn.set_child(
-            svg_icon("stop-white" if rec else "mic-on-white", 22))
+        self.mic_btn.set_child(svg_icon(
+            "stop-white" if rec else "mic-on-white",
+            MINI_SIZES[self.size_key][0]))
         self.status.set_label("Εγγραφή…" if rec else "Έτοιμο")
 
     def _mini_speak(self, btn):
@@ -2288,7 +2341,8 @@ class MiniWindow(Gtk.Window):
     def _speak_state(self, state):
         playing = state == "playing"
         self.speak_btn.set_child(svg_icon(
-            icon_for("stop") if playing else icon_for("speaker"), 22))
+            icon_for("stop") if playing else icon_for("speaker"),
+            MINI_SIZES[self.size_key][0]))
         self.status.set_label("Διαβάζω…" if playing else "Έτοιμο")
         return False
 
