@@ -62,7 +62,7 @@ def main():
     p.buf.set_text("θα γράψ")
     p._on_changed()
     assert p._on_key(None, Gdk.KEY_ISO_Left_Tab, 0, 0) is True
-    assert p.picked == len(p.suggestions) - 1
+    assert p.picked == len(p._chip_items()) - 1        # the ✨ chip is last
 
     # Enter with nothing picked stays a newline, space stays a space
     p.buf.set_text("θα γράψ")
@@ -91,8 +91,9 @@ def main():
     p._on_changed()
     p.ai_phrases = ["λή"]
     p.picked = len(p.suggestions)                      # the ✨ chip
-    labels = [lbl for lbl, _ in p._chip_items()]
+    labels = [lbl for lbl, _, _ in p._chip_items()]
     assert labels[-1].startswith("✨"), labels
+    p.picked = len(labels) - 1
     assert p._on_key(None, Gdk.KEY_Return, 0, 0) is True
     assert p.buf.get_text(*p.buf.get_bounds(), False) == "θέλει δουλειά πολλή"
     assert p.ai_phrases == [] and p.suggestions == []
@@ -101,9 +102,18 @@ def main():
     p.buf.set_text("θέλει δουλειά πολ")
     p._on_changed()
     p.ai_pending = True
-    assert "…" in [lbl for lbl, _ in p._chip_items()]
+    assert any(lbl.endswith("…") for lbl, _, _ in p._chip_items())
     p._dismiss()
-    assert p._chip_items() == [] and p._idle_id is None
+    assert p._chip_items() == []
+
+    # the ✨ trigger rides with the words, the phrases stack under them
+    p.buf.set_text("θέλει δουλειά πολ")
+    p._on_changed()
+    kinds = [k for _, _, k in p._chip_items()]
+    assert kinds.count("word") == len(p.suggestions) + 1, kinds   # + the ✨
+    p.ai_phrases = ["λή για να γίνει", "λά πράγματα ακόμη"]
+    assert [k for _, _, k in p._chip_items()][-2:] == ["phrase", "phrase"]
+    assert "✨" not in [lbl for lbl, _, k in p._chip_items() if k == "word"]
 
     # with nothing typed, the chips become next-word guesses from pairs
     g.predictor().learn("θέλει δουλειά πολλή. θέλει δουλειά ακόμα.")

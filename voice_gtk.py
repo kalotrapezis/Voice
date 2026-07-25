@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta15"
+VERSION = "0.0.6~beta16"
 
 
 _DARK = None
@@ -1397,7 +1397,7 @@ class NotepadPage(Gtk.Box):
         self.picked = -1                   # which chip Tab has walked to
         self.ai_phrases = []               # the model's continuations
         self.ai_pending = False            # request in flight -> "…" chip
-        self._idle_id = None               # pause timer
+        self.dismissed = False             # Esc hides ✨ until the next key
         self.overlay_pos = (0, 0)
 
         self.rec = Recorder()
@@ -1449,7 +1449,7 @@ class NotepadPage(Gtk.Box):
         # places it where it likes — on Plasma it landed over the sidebar,
         # nowhere near the cursor. An overlay lives in buffer coordinates,
         # scrolls with the text and cannot steal focus.
-        self.chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.chips = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.chips.add_css_class("suggest-strip")
         self.chips.set_visible(False)
         self.view.add_overlay(self.chips, 0, 0)
@@ -1489,21 +1489,33 @@ class NotepadPage(Gtk.Box):
                             predictor().next_words(self._prev_word(start)))
         self.ai_phrases = []               # a keystroke invalidates the guess
         self.ai_pending = False
+        self.dismissed = False             # typing again brings ✨ back
         self.picked = -1                   # a fresh word highlights nothing
-        self._restart_idle_timer()
         self._show_chips()
 
+    def _has_context(self):
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        return bool(self.buf.get_text(self.buf.get_start_iter(),
+                                      end, False).strip())
+
     def _chip_items(self):
-        """[(label, action)] — dictionary words first, then AI phrases."""
-        items = [(w, lambda w=w: self._accept(w)) for w in self.suggestions]
+        """[(label, action, kind)] — words on one row, phrases stacked below.
+
+        kind is 'word' (goes in the top row) or 'phrase' (its own row): a
+        whole sentence next to three words never fitted the width."""
+        items = [(w, lambda w=w: self._accept(w), "word")
+                 for w in self.suggestions]
+        if (llm.available() and not self.dismissed and not self.ai_pending
+                and not self.ai_phrases and self._has_context()):
+            items.append(("✨", self._ask_ai, "word"))
         if self.ai_pending:
-            items.append(("…", lambda: None))
+            items.append(("✨ …", lambda: None, "phrase"))
         for phrase in self.ai_phrases:
             shown = phrase.strip()
-            if len(shown) > 46:            # a whole phrase, trimmed to fit
-                shown = shown[:45].rsplit(" ", 1)[0] + "…"
+            if len(shown) > 70:
+                shown = shown[:69].rsplit(" ", 1)[0] + "…"
             items.append(("✨ " + shown,
-                          lambda p=phrase: self._accept_raw(p)))
+                          lambda p=phrase: self._accept_raw(p), "phrase"))
         return items
 
     def _show_chips(self):
@@ -1512,12 +1524,22 @@ class NotepadPage(Gtk.Box):
         if not self._chip_items():
             self.chips.set_visible(False)
             return
-        for i, (label, action) in enumerate(self._chip_items()):
+        row = None
+        for i, (label, action, kind) in enumerate(self._chip_items()):
             b = Gtk.Button(label=label)
             b.add_css_class("suggested-action" if i == self.picked
                             else "kbd-chip")
             b.connect("clicked", lambda _b, a=action: a())
-            self.chips.append(b)
+            if kind == "word":
+                if row is None:
+                    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=6)
+                    self.chips.append(row)
+                row.append(b)
+            else:                          # one phrase per line, left-aligned
+                b.set_halign(Gtk.Align.START)
+                b.get_child().set_xalign(0)
+                self.chips.append(b)
         self._point_at_caret()
         self.chips.set_visible(True)
 
@@ -1570,10 +1592,8 @@ class NotepadPage(Gtk.Box):
         self.suggestions = []
         self.ai_phrases = []
         self.ai_pending = False
+        self.dismissed = True              # Esc means "leave me alone"
         self.picked = -1
-        if self._idle_id:                  # Esc means "leave me alone"
-            GLib.source_remove(self._idle_id)
-            self._idle_id = None
         self._show_chips()
 
     def _accept_raw(self, text):
@@ -1583,26 +1603,11 @@ class NotepadPage(Gtk.Box):
         self._dismiss()
         self.view.grab_focus()
 
-    # a pause this long means "I am thinking", which is when a suggested
-    # continuation helps — and it is why this is not a shortcut: Ctrl+Space
-    # is the keyboard-layout switch on this desktop
-    IDLE_SECONDS = 3
-
-    def _restart_idle_timer(self):
-        if self._idle_id:
-            GLib.source_remove(self._idle_id)
-            self._idle_id = None
-        if llm.available():
-            self._idle_id = GLib.timeout_add_seconds(self.IDLE_SECONDS,
-                                                     self._on_idle)
-
-    def _on_idle(self):
-        self._idle_id = None
-        self._ask_ai()
-        return False
-
     def _ask_ai(self):
-        """After the pause: what would the model write next, given the note."""
+        """The ✨ chip: what would the model write next, given the note.
+
+        Asked for, never on a timer — a background run every time you pause
+        spends 4 s of sixteen threads on a guess you did not want."""
         if not llm.available() or llm.ram_check()[0] == "block":
             return
         end = self.buf.get_iter_at_mark(self.buf.get_insert())
