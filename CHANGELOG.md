@@ -2,6 +2,73 @@
 
 All notable changes to VOICE are documented here.
 
+## v0.0.6 — notepad, Greek word prediction, local AI correction and chat
+
+Everything in this release runs on the machine. The only network traffic is
+the one-time model download, and every model is checked against free RAM
+before it is allowed to load.
+
+### Added
+
+- **Σημειωματάριο tab** — an editor inside VOICE. Suggestions appear under the
+  cursor as an overlay: **Tab** walks them, **Enter** takes one, **Esc**
+  dismisses. Word and character counts sit at the bottom, with the selection
+  in parentheses. The mic dictates into the note; the speaker reads the
+  selection back.
+- **Greek word completion** (`predict.py`) with no model and no download: the
+  system `hunspell-el` dictionary (~828k inflected forms) converted once into
+  a sorted, mmapped index — 41 MB and 23 µs a lookup, against 380 MB and 3.6 s
+  for holding the word list in Python. Ranked by a bundled 50k-word frequency
+  list, then by word pairs learned from what you write: «η ανοιξ…» offers
+  *άνοιξη*, «να ανοιξ…» offers *ανοίξω*. A fully typed unaccented word gets
+  its accented spelling offered, which is how most people type Greek.
+- **Instant correction (Διόρθωση)** — spelling and accents from the same
+  index. On unaccented Greek it restored 5/5 and 6/6 accents in testing and
+  changed nothing in text that was already correct.
+- **AI correction (Διόρθωση AI)** — gemma-3-4b (q4) through llama.cpp, for the
+  mistakes a dictionary cannot see: «συζητησαμε **τη** θα κανουμε» →
+  «Συζητήσαμε **τι** θα κάνουμε», ~12 s a paragraph. Runs on a worker thread,
+  keeps the original text for any chunk that fails, and drops its result
+  rather than overwrite text you changed while it ran.
+- **✨ phrase suggestions** — three whole continuations, generated together,
+  with every earlier paragraph carried as a three-word outline the model
+  writes itself.
+- **💬 Chat (Bob)** — a local chat over the same weights, streamed (first
+  words in 1.4 s). Editable system prompt, 5000-token verbatim window with
+  automatic summarising, and a reset button in Settings.
+- **Model choice, gated on RAM** — dictation offers small / medium /
+  large-v3-q5, correction offers gemma-3-4b. Each is blocked outright when it
+  cannot fit in free memory and warned about when it would take more than
+  half, since a 2.4 GB model on a busy 8 GB machine is how you get a swap
+  storm. Whisper now also uses cores−2 threads instead of a hardcoded 8.
+- **Third Greek voice** — `joy`, fetched on demand (63 MB). Piper has no
+  large Greek voice; the language is three files.
+- **Mini bar size** — small / medium / large in Settings, the original bar
+  being "large".
+
+### Fixed
+
+- **"Πάντα μπροστά" and the floating mini bar did nothing on Wayland.** GTK 4
+  has no `set_keep_above` and a Wayland client has no say in stacking; VOICE
+  now writes the KWin rule itself and asks KWin to re-read it.
+- **The suggestion popover landed over the sidebar.** On Wayland a popover is
+  its own surface, placed by the compositor. It is a TextView overlay now, in
+  buffer coordinates.
+- **`Gdk.Rectangle(x=…, y=…)` silently does nothing** — it is a boxed struct
+  and PyGObject ignores constructor kwargs, so every field stayed 0.
+- **Three different version numbers on one install** (0.0.6~beta6 in dpkg,
+  v0.0.5 in the sidebar, "version 1.0" in About). The build now reads the
+  version from `voice_gtk.py`; the About dialog's phantom "1.0" was a bare `&`
+  in its version string, which made GTK drop the whole string as bad markup.
+- **Two llama-servers could start at once**, and the second overwrote the
+  handle to the first, which then outlived the app. Startup is locked, the
+  server runs in its own process group, and leaving the tab — or quitting —
+  kills the group.
+- **The settings switch for continuous dictation was wired to nothing.**
+- **`packaging` never shipped new modules**: all three specs copy a named list
+  of files, so a beta shipped a notepad whose import would have failed on an
+  installed system.
+
 ## v0.0.5-b — desktop disruption, duplicate text, mini bar
 
 A bug-fix revision of the GTK 4 UI, found by using it. Two of these had been

@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta19"
+VERSION = "0.0.6"
 
 
 _DARK = None
@@ -97,6 +97,13 @@ _ICONS = {
     "gear": ("Gear-Darklines", "Gear-white"),
     "pin": ("pin-dark", "pin-white"),
     "stop": ("stop-black", "stop-white"),
+}
+
+
+# roles without a hand-drawn SVG fall back to the theme's symbolic set
+_STOCK_ICONS = {
+    "notepad": "document-edit-symbolic",
+    "chat": "dialog-messages-symbolic",    # a speech bubble, not a pencil
 }
 
 
@@ -2051,7 +2058,7 @@ class SettingsPage(Gtk.Box):
         self.feature_toggles = {}
         feats = [("dictation", "🎤  Υπαγόρευση"), ("read", "📖  Ανάγνωση"),
                  ("meeting", "📝  Σύσκεψη"), ("notepad", "📝  Σημειωματάριο"),
-                 ("chat", "🤖  Bob"),
+                 ("chat", "💬  Chat (Bob)"),
                  ("clipboard", "📋  Πρόχειρο")]
         for i, (key, label) in enumerate(feats):
             sw = Gtk.Switch(active=True)
@@ -2780,7 +2787,7 @@ class MainWindow(Gtk.ApplicationWindow):
              ("read", "Ανάγνωση", "speaker"),
              ("meeting", "Σύσκεψη", "meeting"),
              ("notepad", "Σημειωματάριο", "notepad"),
-             ("chat", "Bob", "chat"),
+             ("chat", "Chat (Bob)", "chat"),
              ("clipboard", "Πρόχειρο", "clip")]
 
     def __init__(self, app):
@@ -2917,8 +2924,9 @@ class MainWindow(Gtk.ApplicationWindow):
         role = "gear" if icon == "settings-gear" else icon
         if role in _ICONS:
             box.append(svg_icon(icon_for(role), 18))
-        else:                              # no SVG drawn for it yet
-            img = Gtk.Image.new_from_icon_name("document-edit-symbolic")
+        else:                              # no SVG drawn for these two yet
+            img = Gtk.Image.new_from_icon_name(
+                _STOCK_ICONS.get(role, "document-edit-symbolic"))
             img.set_pixel_size(18)
             box.append(img)
         box.append(Gtk.Label(label=label, xalign=0))
