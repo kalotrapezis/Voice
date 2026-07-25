@@ -1312,6 +1312,15 @@ class SettingsPage(Gtk.Box):
                                 dropdown(["Ενεργό παράθυρο"])))
         self.lang_drop = dropdown(list(LANGS.keys()))
         dic.append(settings_row("Γλώσσα", None, self.lang_drop))
+        self.stt_keys = list(vk.WHISPER_MODELS)
+        self.stt_drop = dropdown([vk.WHISPER_MODELS[k][3]
+                                  for k in self.stt_keys])
+        self.stt_sub = dim(Gtk.Label(label="", xalign=0, wrap=True))
+        stt_row = settings_row("Μοντέλο αναγνώρισης", None, self.stt_drop)
+        dic.append(stt_row)
+        sub_box = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
+        sub_box.append(self.stt_sub)
+        dic.append(sub_box)
         self.deliver_toggle = Gtk.Switch(active=True)
         dic.append(settings_row("Παράδοση στην εφαρμογή", None,
                                 self.deliver_toggle))
@@ -1438,6 +1447,12 @@ class SettingsPage(Gtk.Box):
             list(LANGS.values()))
         sel(self.voice_drop, cfg.get("VOICE", ""), list(ra.VOICES.keys()))
         self.meet_src_drop.set_selected(int(cfg.get("MEET_SRC", "0") or 0))
+        self._stt_key = cfg.get("STT_MODEL", "small")
+        if self._stt_key not in self.stt_keys:
+            self._stt_key = "small"
+        self.stt_drop.set_selected(self.stt_keys.index(self._stt_key))
+        self._stt_describe()
+        self.stt_drop.connect("notify::selected", self._stt_changed)
         try:
             self.speed_scale.set_value(float(cfg.get("SPEED", "1.0")))
         except ValueError:
@@ -1479,6 +1494,47 @@ class SettingsPage(Gtk.Box):
         for key, sw in self.feature_toggles.items():
             cfg[f"FEAT_{key.upper()}"] = "1" if sw.get_active() else "0"
         vk.save_config(cfg)
+
+    # ---- speech model (download + RAM gating)
+    def _stt_describe(self):
+        key = self._stt_key
+        _, dl_gb, need, _, note = vk.WHISPER_MODELS[key]
+        status, msg = vk.model_ram_check(key)
+        if msg:
+            self.stt_sub.set_label(("⚠  " if status == "warn" else "⛔  ") + msg)
+        else:
+            self.stt_sub.set_label(
+                f"{note} · ~{need:.1f} GB RAM · λήψη {dl_gb:.1f} GB"
+                + ("" if vk.model_installed(key) else " (δεν έχει ληφθεί)"))
+
+    def _stt_revert(self):
+        self.stt_drop.set_selected(self.stt_keys.index(self._stt_key))
+
+    def _stt_accept(self, key):
+        self._stt_key = key
+        cfg = vk.load_config()
+        cfg["STT_MODEL"] = key
+        vk.save_config(cfg)
+        self._stt_describe()
+
+    def _stt_changed(self, *_):
+        i = self.stt_drop.get_selected()
+        if i == Gtk.INVALID_LIST_POSITION:
+            return
+        key = self.stt_keys[i]
+        if key == self._stt_key:
+            return
+        status, msg = vk.model_ram_check(key)
+        if status == "block":
+            self._stt_revert()
+            InfoDialog(self.win, "Δεν υπάρχει αρκετή μνήμη", msg).present()
+            return
+        if not vk.model_installed(key):
+            self._stt_revert()
+            ModelDownloadDialog(self.win, key, msg,
+                                on_done=lambda: self._stt_accept(key)).present()
+            return
+        self._stt_accept(key)
 
     def _set_shortcut(self, key, combo):
         self.sc_chips[key].set_label(combo or "—")
@@ -1599,6 +1655,92 @@ class TargetDialog(VoiceDialog):
         ok.add_css_class("suggested-action")
         ok.connect("clicked", lambda *_: self.close())
         self.action_bar(cancel, ok)
+
+
+class InfoDialog(VoiceDialog):
+    """One message + Εντάξει. Used for the RAM refusal."""
+
+    def __init__(self, parent, title, message):
+        super().__init__(parent, title, 460)
+        self.box.append(dim(Gtk.Label(label=message, xalign=0, wrap=True),
+                            small=False))
+        ok = Gtk.Button(label="Εντάξει")
+        ok.add_css_class("suggested-action")
+        ok.connect("clicked", lambda *_: self.close())
+        self.action_bar(ok)
+
+
+class ModelDownloadDialog(VoiceDialog):
+    """Confirm + download a whisper model, with the RAM warning up front.
+
+    The worker thread never touches widgets — it hands progress to the GTK
+    main loop via GLib.idle_add (same rule as the Tkinter first-run dialog)."""
+
+    def __init__(self, parent, key, warning, on_done=None):
+        fname, dl_gb, need, label, note = vk.WHISPER_MODELS[key]
+        super().__init__(parent, "Λήψη μοντέλου", 470)
+        self.key, self.fname, self.on_done = key, fname, on_done
+
+        self.box.append(dim(Gtk.Label(
+            label=f"{label} — {note}\nΛήψη ~{dl_gb:.1f} GB · χρειάζεται "
+                  f"~{need:.1f} GB RAM στη χρήση.",
+            xalign=0, wrap=True), small=False))
+        if warning:
+            w = Gtk.Label(label="⚠  " + warning, xalign=0, wrap=True)
+            w.add_css_class("accent-text")
+            self.box.append(w)
+
+        self.status = dim(Gtk.Label(label="", xalign=0), small=False)
+        self.bar = Gtk.ProgressBar(hexpand=True)
+        self.bar.set_visible(False)
+        self.box.append(self.status)
+        self.box.append(self.bar)
+
+        self.cancel = Gtk.Button(label="Άκυρο")
+        self.cancel.connect("clicked", lambda *_: self.close())
+        self.go = Gtk.Button(label="Λήψη")
+        self.go.add_css_class("suggested-action")
+        self.go.connect("clicked", self._start)
+        self.action_bar(self.cancel, self.go)
+
+    def _start(self, btn):
+        self.go.set_sensitive(False)
+        self.cancel.set_sensitive(False)
+        self.bar.set_visible(True)
+        self.status.set_label("Σύνδεση…")
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def _work(self):
+        dest = vk.model_path(self.key)
+        try:
+            vk._download(f"{vk.HF_WHISPER}/{self.fname}", dest,
+                         lambda done, total: GLib.idle_add(
+                             self._progress, done, total))
+        except Exception as e:                      # network / disk / timeout
+            try:
+                os.remove(dest + ".part")
+            except OSError:
+                pass
+            GLib.idle_add(self._failed, str(e))
+            return
+        GLib.idle_add(self._finished)
+
+    def _progress(self, done, total):
+        self.bar.set_fraction(done / total if total else 0.0)
+        self.status.set_label(f"{done / 1e9:0.2f} GB"
+                              + (f" / {total / 1e9:0.2f} GB" if total else ""))
+
+    def _failed(self, err):
+        self.bar.set_visible(False)
+        self.status.set_label(f"Η λήψη απέτυχε: {err}")
+        self.cancel.set_label("Κλείσιμο")
+        self.cancel.set_sensitive(True)
+        self.go.set_sensitive(True)
+
+    def _finished(self):
+        if self.on_done:
+            self.on_done()
+        self.close()
 
 
 class ShortcutDialog(VoiceDialog):

@@ -44,6 +44,20 @@ WHISPER = os.path.join(HERE, "whisper.cpp", "build", "bin", "whisper-cli")
 
 # first-run downloads (lean package: models fetched once into voice_data_dir)
 WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+HF_WHISPER = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+
+# Selectable speech-recognition models: key -> (file, download GB, RAM GB needed,
+# label, note). RAM figures are whisper.cpp's working set (weights + decode
+# buffers), measured with a little headroom — they gate installation below.
+WHISPER_MODELS = {
+    "small": ("ggml-small.bin", 0.49, 1.0,
+              "Μικρό (small)", "Γρήγορο · λιγότερη ακρίβεια"),
+    "medium": ("ggml-medium.bin", 1.53, 2.8,
+               "Μεσαίο (medium)", "Καλή ακρίβεια · ~2× πιο αργό"),
+    "large-q5": ("ggml-large-v3-q5_0.bin", 1.08, 3.9,
+                 "Μεγάλο κβαντισμένο (large-v3 q5)",
+                 "Η καλύτερη ακρίβεια · αργό, θέλει μνήμη"),
+}
 VOICE_BASE = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
               "el/el_GR/rapunzelina")
 WAV = "/tmp/voicekbd_gui.wav"
@@ -129,9 +143,9 @@ def transcribe(path, lang):
     try:
         res = subprocess.run(
             ["nice", "-n", "10",
-             WHISPER, "-m", MODEL, "-f", path, "-l", lang, "-t", "8",
+             WHISPER, "-m", whisper_model(), "-f", path, "-l", lang, "-t", "8",
              "-nt", "-np"],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, text=True, timeout=300)
         return clean_transcript(res.stdout)
     except Exception:
         return ""
@@ -282,6 +296,72 @@ def save_config(cfg):
     with open(CONFIG, "w") as f:
         for k, v in cfg.items():
             f.write(f"{k}={v}\n")
+
+
+# ============ speech model selection + RAM gating ============
+def mem_gb():
+    """(total, available) RAM in GB from /proc/meminfo. (0, 0) if unreadable."""
+    vals = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, rest = line.partition(":")
+                vals[k] = int(rest.split()[0]) / 1048576.0   # kB -> GB
+    except (OSError, ValueError, IndexError):
+        return 0.0, 0.0
+    return vals.get("MemTotal", 0.0), vals.get("MemAvailable", 0.0)
+
+
+def model_path(key):
+    f, *_ = WHISPER_MODELS.get(key) or WHISPER_MODELS["small"]
+    return os.path.join(MODELS_DIR, f)
+
+
+def model_installed(key):
+    return os.path.exists(model_path(key))
+
+
+def model_ram_check(key):
+    """(status, message) for using/installing model `key`.
+
+    'ok'    — fits comfortably.
+    'warn'  — needs more than half of what's free right now (many apps open).
+    'block' — the machine can't run it: it wouldn't fit in free RAM, or barely
+              fits in total RAM even with everything closed.
+    """
+    entry = WHISPER_MODELS.get(key)
+    if not entry:
+        return "block", "Άγνωστο μοντέλο."
+    _, dl_gb, need, label, _ = entry
+    total, avail = mem_gb()
+    if total <= 0:
+        return "ok", ""                      # can't measure — don't block
+    if need > total * 0.8:
+        return "block", (
+            f"Το «{label}» χρειάζεται ~{need:.1f} GB RAM, αλλά το σύστημα "
+            f"έχει συνολικά {total:.1f} GB. Δεν μπορεί να τρέξει εδώ.")
+    if need > avail:
+        return "block", (
+            f"Το «{label}» χρειάζεται ~{need:.1f} GB RAM και τώρα είναι "
+            f"διαθέσιμα μόνο {avail:.1f} GB. Κλείσε εφαρμογές και ξαναδοκίμασε.")
+    if need > avail / 2:
+        return "warn", (
+            f"Το «{label}» θα πιάσει ~{need:.1f} GB από τα {avail:.1f} GB "
+            f"που είναι ελεύθερα — πάνω από τα μισά. Με πολλές ανοιχτές "
+            f"εφαρμογές το σύστημα μπορεί να γίνει αργό. Λήψη ~{dl_gb:.1f} GB.")
+    return "ok", ""
+
+
+def whisper_model():
+    """Path of the selected model, falling back to small if it isn't there."""
+    env = os.environ.get("WHISPER_MODEL")
+    if env:
+        return env
+    key = load_config().get("STT_MODEL", "small")
+    if key != "small" and (not model_installed(key)
+                           or model_ram_check(key)[0] == "block"):
+        key = "small"
+    return model_path(key)
 
 
 # ============ scrollable container ============
