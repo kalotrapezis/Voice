@@ -214,12 +214,15 @@ window.voice-main { background: @theme_bg_color; }
 window.voice-mini {
   background: shade(@theme_bg_color, 0.99);
   border: 1px solid alpha(currentColor, 0.2);
-  border-radius: 22px;
+  border-radius: 14px;
 }
-window.voice-mini.expanded { border-radius: 20px; }
-.mini-round { border-radius: 9999px; min-width: 30px; min-height: 30px;
-               padding: 0; }
-.mini-handle { padding: 4px 6px; }
+window.voice-mini.expanded { border-radius: 14px; }
+/* half the old height: the round buttons set the bar's thickness */
+.mini-round { border-radius: 9999px; min-width: 22px; min-height: 22px;
+              padding: 0; }
+.mini-handle { padding: 0 4px; font-size: 10px; }
+.voice-mini button.flat { min-width: 22px; min-height: 22px; padding: 0; }
+.voice-mini label { font-size: 11px; }
 .mini-round.destructive-action, .mini-round.record-red {
   background: #e01b24; color: #ffffff;
 }
@@ -1865,26 +1868,26 @@ class MiniWindow(Gtk.Window):
         self.add_css_class("voice-mini")
         self.expanded = False
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
-                        margin_top=4, margin_bottom=4,
-                        margin_start=10, margin_end=6)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                        margin_top=2, margin_bottom=2,
+                        margin_start=6, margin_end=4)
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         handle = Gtk.Label(label="⠿")
         dim(handle, small=False)
         handle.add_css_class("mini-handle")
         bar.append(handle)
 
-        self.mic_btn = svg_button("mic-on-white", 18,
+        self.mic_btn = svg_button("mic-on-white", 13,
                                   ("destructive-action", "mini-round"))
         self.mic_btn.connect("clicked", self._mini_mic)
         bar.append(self.mic_btn)
 
-        self.speak_btn = svg_button(icon_for("speaker"), 18, ("mini-round",))
+        self.speak_btn = svg_button(icon_for("speaker"), 13, ("mini-round",))
         self.speak_btn.connect("clicked", self._mini_speak)
         bar.append(self.speak_btn)
 
-        self.clip_btn = svg_button(icon_for("clip"), 18, ("mini-round",))
+        self.clip_btn = svg_button(icon_for("clip"), 13, ("mini-round",))
         self.clip_btn.connect("clicked", self._toggle_clip)
         bar.append(self.clip_btn)
 
