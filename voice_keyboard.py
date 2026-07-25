@@ -46,6 +46,10 @@ WHISPER = os.path.join(HERE, "whisper.cpp", "build", "bin", "whisper-cli")
 WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 HF_WHISPER = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
+# whisper.cpp scales with cores but flattens out past ~12 threads, and leaving
+# a couple free keeps the desktop (and ydotool) responsive while it grinds.
+THREADS = max(4, min((os.cpu_count() or 8) - 2, 12))
+
 # Selectable speech-recognition models: key -> (file, download GB, RAM GB needed,
 # label, note). RAM figures are whisper.cpp's working set (weights + decode
 # buffers), measured with a little headroom — they gate installation below.
@@ -53,10 +57,10 @@ WHISPER_MODELS = {
     "small": ("ggml-small.bin", 0.49, 1.0,
               "Μικρό (small)", "Γρήγορο · λιγότερη ακρίβεια"),
     "medium": ("ggml-medium.bin", 1.53, 2.8,
-               "Μεσαίο (medium)", "Καλή ακρίβεια · ~2× πιο αργό"),
+               "Μεσαίο (medium)", "Καλή ακρίβεια · ~3× πιο αργό από το μικρό"),
     "large-q5": ("ggml-large-v3-q5_0.bin", 1.08, 3.9,
                  "Μεγάλο κβαντισμένο (large-v3 q5)",
-                 "Η καλύτερη ακρίβεια · αργό, θέλει μνήμη"),
+                 "Η καλύτερη ακρίβεια · ~4× πιο αργό, θέλει μνήμη"),
 }
 VOICE_BASE = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
               "el/el_GR/rapunzelina")
@@ -143,8 +147,8 @@ def transcribe(path, lang):
     try:
         res = subprocess.run(
             ["nice", "-n", "10",
-             WHISPER, "-m", whisper_model(), "-f", path, "-l", lang, "-t", "8",
-             "-nt", "-np"],
+             WHISPER, "-m", whisper_model(), "-f", path, "-l", lang,
+             "-t", str(THREADS), "-nt", "-np"],
             capture_output=True, text=True, timeout=300)
         return clean_transcript(res.stdout)
     except Exception:

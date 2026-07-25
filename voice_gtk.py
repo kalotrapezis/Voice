@@ -214,10 +214,11 @@ window.voice-main { background: @theme_bg_color; }
 window.voice-mini {
   background: shade(@theme_bg_color, 0.99);
   border: 1px solid alpha(currentColor, 0.2);
-  border-radius: 38px;
+  border-radius: 22px;
 }
 window.voice-mini.expanded { border-radius: 20px; }
-.mini-round { border-radius: 9999px; min-width: 44px; min-height: 44px; }
+.mini-round { border-radius: 9999px; min-width: 30px; min-height: 30px;
+               padding: 0; }
 .mini-handle { padding: 4px 6px; }
 .mini-round.destructive-action, .mini-round.record-red {
   background: #e01b24; color: #ffffff;
@@ -1324,8 +1325,9 @@ class SettingsPage(Gtk.Box):
         self.deliver_toggle = Gtk.Switch(active=True)
         dic.append(settings_row("Παράδοση στην εφαρμογή", None,
                                 self.deliver_toggle))
+        self.cont_toggle = Gtk.Switch()
         dic.append(settings_row("Συνεχής λειτουργία (γράφει στις παύσεις)",
-                                None, Gtk.Switch()))
+                                None, self.cont_toggle))
         dic.append(settings_row("Εμφάνιση πλαισίου κειμένου", None,
                                 Gtk.Switch(), divider=False))
         body.append(group("🎤  Υπαγόρευση",
@@ -1447,6 +1449,12 @@ class SettingsPage(Gtk.Box):
             list(LANGS.values()))
         sel(self.voice_drop, cfg.get("VOICE", ""), list(ra.VOICES.keys()))
         self.meet_src_drop.set_selected(int(cfg.get("MEET_SRC", "0") or 0))
+        # the switch on the dictation card is the single source of truth —
+        # the settings one was a mockup leftover wired to nothing
+        self.cont_toggle.set_active(cfg.get("CONT", "0") == "1")
+        self.cont_toggle.bind_property(
+            "active", self.win.pages["dictation"].mode_toggle, "active",
+            GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
         self._stt_key = cfg.get("STT_MODEL", "small")
         if self._stt_key not in self.stt_keys:
             self._stt_key = "small"
@@ -1469,7 +1477,7 @@ class SettingsPage(Gtk.Box):
 
         # persist on any change (after initial values are in place)
         for w in (self.mini_toggle, self.top_toggle, self.deliver_toggle,
-                  *self.feature_toggles.values()):
+                  self.cont_toggle, *self.feature_toggles.values()):
             w.connect("notify::active", lambda *_: self._persist())
         for d in (self.lang_drop, self.meet_lang_drop, self.voice_drop,
                   self.meet_src_drop, self.mic_drop):
@@ -1485,6 +1493,7 @@ class SettingsPage(Gtk.Box):
             MINI="1" if self.mini_toggle.get_active() else "0",
             TOPMOST="1" if self.top_toggle.get_active() else "0",
             DELIVER="1" if self.deliver_toggle.get_active() else "0",
+            CONT="1" if self.cont_toggle.get_active() else "0",
             LANG=self.dict_lang(), MEET_LANG=self.meet_lang(),
             VOICE=list(ra.VOICES.keys())[self.voice_drop.get_selected()],
             MEET_SRC=str(self.meet_src_drop.get_selected()),
@@ -1856,26 +1865,26 @@ class MiniWindow(Gtk.Window):
         self.add_css_class("voice-mini")
         self.expanded = False
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                        margin_top=10, margin_bottom=10,
-                        margin_start=14, margin_end=10)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                        margin_top=4, margin_bottom=4,
+                        margin_start=10, margin_end=6)
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         handle = Gtk.Label(label="⠿")
         dim(handle, small=False)
         handle.add_css_class("mini-handle")
         bar.append(handle)
 
-        self.mic_btn = svg_button("mic-on-white", 22,
+        self.mic_btn = svg_button("mic-on-white", 18,
                                   ("destructive-action", "mini-round"))
         self.mic_btn.connect("clicked", self._mini_mic)
         bar.append(self.mic_btn)
 
-        self.speak_btn = svg_button(icon_for("speaker"), 22, ("mini-round",))
+        self.speak_btn = svg_button(icon_for("speaker"), 18, ("mini-round",))
         self.speak_btn.connect("clicked", self._mini_speak)
         bar.append(self.speak_btn)
 
-        self.clip_btn = svg_button(icon_for("clip"), 22, ("mini-round",))
+        self.clip_btn = svg_button(icon_for("clip"), 18, ("mini-round",))
         self.clip_btn.connect("clicked", self._toggle_clip)
         bar.append(self.clip_btn)
 
@@ -2074,13 +2083,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.stack = Gtk.Stack(hexpand=True, vexpand=True)
         GLib.timeout_add(500, lambda: self.stack.set_transition_type(
             Gtk.StackTransitionType.CROSSFADE) or False)
-        self.pages = {
-            "dictation": DictationPage(self),
-            "read": ReadPage(self),
-            "meeting": MeetingPage(self),
-            "clipboard": ClipboardPage(self),
-            "settings": SettingsPage(self),
-        }
+        # built one at a time, not as a dict literal: SettingsPage reaches for
+        # self.pages["dictation"] while constructing, and a literal would only
+        # bind self.pages after every page was already built
+        self.pages = {}
+        for key, cls in (("dictation", DictationPage), ("read", ReadPage),
+                         ("meeting", MeetingPage), ("clipboard", ClipboardPage),
+                         ("settings", SettingsPage)):
+            self.pages[key] = cls(self)
         for key, page in self.pages.items():
             self.stack.add_named(page, key)
         body.append(self.stack)
