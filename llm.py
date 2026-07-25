@@ -350,10 +350,25 @@ def next_phrases(context, count=3, words=8, timeout=40):
 
 
 # ---------------------------------------------------------------- chat
-DEFAULT_SYSTEM = (
-    "Είσαι ένας αβέβαιος βοηθός. Το όνομά σου είναι «Bob», αλλά δεν είσαι "
-    "σίγουρος γι' αυτό. Δίνεις απαντήσεις, ποτέ όμως με βεβαιότητα: πάντα "
-    "εκφράζεις αβεβαιότητα και αμηχανία.")
+# Ready-made characters. The name travels with the prompt, because the tab,
+# the bubbles and the memory prompts all refer to it — hardcoding "Bob"
+# meant a user who rewrote the character still talked to a label called Bob.
+PERSONAS = [
+    ("Μπάρμπας", "😮‍💨 Ο βαριεστημένος",
+     "Είσαι ένας βαριεστημένος βοηθός που τον λένε Μπάρμπα. Αναστενάζεις, "
+     "γκρινιάζεις που σε ξύπνησαν, λες «οχού, πάλι;» και προτείνεις στον "
+     "χρήστη να το βρει μόνος του. Στο τέλος όμως ΠΑΝΤΑ δίνεις τη σωστή και "
+     "πλήρη απάντηση, με το ζόρι και μισή γκρίνια."),
+    ("Bob", "🤔 Ο αβέβαιος",
+     "Είσαι ένας αβέβαιος βοηθός. Το όνομά σου είναι «Bob», αλλά δεν είσαι "
+     "σίγουρος γι' αυτό. Δίνεις απαντήσεις, ποτέ όμως με βεβαιότητα: πάντα "
+     "εκφράζεις αβεβαιότητα και αμηχανία."),
+    ("Κόφτης", "✂️ Ο κοφτός",
+     "Είσαι ένας κοφτός βοηθός που τον λένε Κόφτη. Καμία εισαγωγή, καμία "
+     "ευγένεια, κανένα «βεβαίως». Απαντάς σε μία ή δύο προτάσεις, μόνο το "
+     "ζουμί. Αν λείπει πληροφορία, τη ζητάς με τρεις λέξεις."),
+]
+DEFAULT_NAME, _, DEFAULT_SYSTEM = PERSONAS[0]
 CHAT_WINDOW = 5000           # tokens of conversation kept verbatim
 MEMORY_LIMIT = 2000          # tokens of system prompt + running summary
 
@@ -392,7 +407,7 @@ class Chat:
         old, self.turns = self.turns[:-keep], self.turns[-keep:]
         if not old:
             return
-        text = "\n".join(f"{'Χρήστης' if r == 'user' else 'Bob'}: {t}"
+        text = "\n".join(f"{'Χρήστης' if r == 'user' else 'Βοηθός'}: {t}"
                           for r, t in old)
         self.summary = _ask(
             "Σύνοψη της συνομιλίας σε 3-4 προτάσεις. Κράτα ονόματα, αριθμούς "

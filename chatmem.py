@@ -96,7 +96,7 @@ class Store:
         chat = self.get(chat_id)
         if not chat or not chat["turns"] or chat.get("note"):
             return ""
-        said = "\n".join(f"{'Χρήστης' if r == 'user' else 'Bob'}: {t}"
+        said = "\n".join(f"{'Χρήστης' if r == 'user' else 'Βοηθός'}: {t}"
                          for r, t in chat["turns"][:12])
         note = llm._ask(
             f"Περίγραψε σε {NOTE_WORDS} λέξεις για τι μίλησαν. Μόνο τις "
