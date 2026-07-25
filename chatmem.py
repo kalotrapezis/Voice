@@ -21,6 +21,7 @@ from read_aloud import voice_data_dir
 
 STORE = os.path.join(voice_data_dir(), "chats.json")
 MAX_NOTES = 25              # notes kept before they are folded into one line
+FACTS_VERBATIM = 5          # newest details kept exactly as they were said
 MAX_FACTS = 20              # personal details carried into new conversations
 NOTE_WORDS = 2
 TITLE_CHARS = 40
@@ -37,7 +38,8 @@ class Store:
         self.path = path
         self.chats = []                   # newest first
         self.notes = []                   # ["δύο λέξεις", ...]
-        self.facts = []                   # ["Τον λένε Τέο", ...]
+        self.facts = []                   # newest details, verbatim
+        self.facts_general = ""           # older ones, generalised to a line
         self.summary = ""
         self.load()
 
@@ -51,6 +53,7 @@ class Store:
         self.chats = data.get("chats", [])
         self.notes = data.get("notes", [])
         self.facts = data.get("facts", [])
+        self.facts_general = data.get("facts_general", "")
         self.summary = data.get("summary", "")
 
     def save(self):
@@ -58,8 +61,9 @@ class Store:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"chats": self.chats, "notes": self.notes,
-                       "facts": self.facts, "summary": self.summary},
-                      f, ensure_ascii=False)
+                       "facts": self.facts,
+                       "facts_general": self.facts_general,
+                       "summary": self.summary}, f, ensure_ascii=False)
         os.replace(tmp, self.path)
 
     # ---- chats
@@ -142,8 +146,27 @@ class Store:
             known.add(fact.lower())
             self.facts.append(fact)
             added.append(fact)
-        del self.facts[:-MAX_FACTS]        # keep the most recent ones
+        self.generalise_facts()
         return added
+
+    def generalise_facts(self):
+        """Keep the last few details word for word, blur the rest into a line.
+
+        "όνομα: Τέο" matters exactly; that he asked about bread in March is
+        better remembered as "μαγειρική, λογισμικό" than as five stale lines."""
+        if len(self.facts) <= FACTS_VERBATIM:
+            return
+        old, self.facts = self.facts[:-FACTS_VERBATIM], \
+            self.facts[-FACTS_VERBATIM:]
+        line = llm._ask(
+            "Γενίκευσε τα παρακάτω σε 1-2 σύντομες γραμμές, κρατώντας μόνο "
+            "ό,τι περιγράφει σταθερά τον χρήστη.\n\n"
+            + (f"Ήδη γνωστά: {self.facts_general}\n" if self.facts_general
+               else "") + "\n".join(old),
+            n_predict=90, temperature=0)
+        merged = line or " · ".join(
+            x for x in [self.facts_general] + old if x)
+        self.facts_general = merged.strip()[:300]
 
     def fold(self):
         """All the notes become one sentence — memory has to stay bounded."""
@@ -159,7 +182,9 @@ class Store:
         """What a new conversation is told about the old ones."""
         parts = ([self.summary] if self.summary else []) + self.notes[-12:]
         topics = " · ".join(p for p in parts if p)
-        facts = "· ".join(self.facts[-MAX_FACTS:])
+        facts = " · ".join(
+            x for x in [self.facts_general] + self.facts[-FACTS_VERBATIM:]
+            if x)
         out = []
         if facts:
             out.append(f"Ο χρήστης: {facts}")
@@ -170,6 +195,7 @@ class Store:
     def forget(self):
         self.notes = []
         self.facts = []
+        self.facts_general = ""
         self.summary = ""
         for chat in self.chats:
             chat["note"] = ""
@@ -200,16 +226,18 @@ def demo():
         assert again.notes == [] and again.summary
     assert len(again.memory_text()) < 700
 
-    # personal details are kept, deduped and bounded
-    again.facts = ["Τον λένε Τέο"]
-    again.facts += [f"στοιχείο {i}" for i in range(MAX_FACTS + 5)]
-    del again.facts[:-MAX_FACTS]
-    assert len(again.facts) == MAX_FACTS
-    again.facts = ["Τον λένε Τέο", "Γράφει ελληνικό λογισμικό"]
-    assert "Ο χρήστης: Τον λένε Τέο" in again.memory_text()
+    # personal details: the newest stay verbatim, older ones generalise
+    again.facts = [f"στοιχείο {i}" for i in range(FACTS_VERBATIM + 4)]
+    again.generalise_facts()
+    assert len(again.facts) == FACTS_VERBATIM, again.facts
+    assert again.facts_general, "τα παλιά δεν γενικεύτηκαν"
+    again.facts = ["όνομα: Τέο", "δουλειά: λογισμικό"]
+    again.facts_general = ""
+    assert "Ο χρήστης: όνομα: Τέο" in again.memory_text()
 
     again.forget()
     assert again.notes == [] and again.summary == "" and again.facts == []
+    assert again.facts_general == ""
     assert again.memory_text() == ""
 
     # a chat with no turns is never summarised (nothing to say about it)

@@ -425,8 +425,9 @@ class Chat:
     CHAT_WINDOW tokens; when the system prompt plus that summary themselves
     pass MEMORY_LIMIT, the summary is summarised again."""
 
-    def __init__(self, system=None):
+    def __init__(self, system=None, temperature=0.7):
         self.system = system or DEFAULT_SYSTEM
+        self.temperature = temperature
         self.turns = []                   # [(role, text)] role: user|model
         self.summary = ""
 
@@ -489,7 +490,8 @@ class Chat:
                 MEMORY_LIMIT:
             self._compress_memory()
         reply = _ask(self._prompt(message), n_predict=n_predict,
-                     timeout=timeout, raw=True, on_token=on_token)
+                     timeout=timeout, raw=True, on_token=on_token,
+                     temperature=self.temperature)
         if reply:
             self.turns += [("user", message), ("model", reply)]
         return reply

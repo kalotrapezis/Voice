@@ -71,7 +71,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.7~beta5"
+VERSION = "0.0.7~beta6"
 
 
 _DARK = None
@@ -775,6 +775,16 @@ def save_chat_name(name):
     cfg = vk.load_config()
     cfg["CHAT_NAME"] = name.strip() or llm.DEFAULT_NAME
     vk.save_config(cfg)
+
+
+def chat_temp():
+    """0 is repeatable and dry, 1.2 is loose. The character prompts want a
+    little room, so the default sits in the middle."""
+    try:
+        return max(0.0, min(1.4, float(vk.load_config().get("CHAT_TEMP",
+                                                           "0.7"))))
+    except ValueError:
+        return 0.7
 
 
 def chat_system():
@@ -1812,7 +1822,8 @@ class ChatPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.win = win
         self.store = chatmem.Store()
-        self.chat = llm.Chat(system=self._system_with_memory())
+        self.chat = llm.Chat(system=self._system_with_memory(),
+                             temperature=chat_temp())
         self.current = self.store.new_chat()
         self.busy = False
 
@@ -1895,8 +1906,14 @@ class ChatPage(Gtk.Box):
         """The character, plus two words per past conversation."""
         base = chat_system()
         mem = self.store.memory_text()
-        return f"{base}\n\n[Θυμάσαι από παλιότερες κουβέντες: {mem}]" \
-            if mem else base
+        if not mem:
+            return base
+        # "Θυμάσαι…" made it greet every new chat by reciting the file. It is
+        # background knowledge: use it when it helps, never announce it.
+        return (f"{base}\n\n[Παρασκήνιο, ΜΗΝ το αναφέρεις και ΜΗΝ το "
+                f"απαριθμείς: {mem}. Χρησιμοποίησέ το μόνο αν βοηθάει την "
+                f"απάντηση, σαν να το ήξερες ήδη. Μη χαιρετάς σαν να "
+                f"συνεχίζεις παλιά κουβέντα.]")
 
     def rename(self):
         """Follow a persona change without a restart."""
@@ -1918,16 +1935,35 @@ class ChatPage(Gtk.Box):
                           margin_top=6, margin_bottom=6,
                           margin_start=8, margin_end=8)
             title = Gtk.Label(label=chat["title"], xalign=0, wrap=True,
-                              max_width_chars=22, lines=2,
+                              max_width_chars=18, lines=2,
                               ellipsize=Pango.EllipsizeMode.END)
             box.append(title)
             if chat.get("note"):
                 note = Gtk.Label(label="🧠 " + chat["note"], xalign=0)
                 note.add_css_class("chat-note")
                 box.append(dim(note))
-            row.set_child(box)
+            line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            box.set_hexpand(True)
+            line.append(box)
+            drop = Gtk.Button(icon_name="user-trash-symbolic")
+            drop.add_css_class("flat")
+            drop.set_valign(Gtk.Align.CENTER)
+            drop.set_tooltip_text("Διαγραφή συζήτησης")
+            drop.connect("clicked", self._delete_chat, chat["id"])
+            line.append(drop)
+            row.set_child(line)
             row.chat_id = chat["id"]
             self.history.append(row)
+
+    def _delete_chat(self, btn, chat_id):
+        """Drop one conversation. Its two-word note stays in memory — you
+        deleted a transcript, not the fact that you talked about bread."""
+        self.store.drop(chat_id)
+        self.store.save()
+        if chat_id == self.current["id"]:
+            self._blank_chat()
+        else:
+            self.refresh_history()
 
     def _on_history(self, listbox, row):
         if getattr(row, "chat_id", None) == self.current["id"]:
@@ -1939,7 +1975,8 @@ class ChatPage(Gtk.Box):
         if chat is None:
             return
         self.current = chat
-        self.chat = llm.Chat(system=self._system_with_memory())
+        self.chat = llm.Chat(system=self._system_with_memory(),
+                             temperature=chat_temp())
         self.chat.turns = [tuple(t) for t in chat["turns"]]
         while (c := self.thread_box.get_first_child()):
             self.thread_box.remove(c)
@@ -1953,7 +1990,8 @@ class ChatPage(Gtk.Box):
 
     def _blank_chat(self):
         self.current = self.store.new_chat()
-        self.chat = llm.Chat(system=self._system_with_memory())
+        self.chat = llm.Chat(system=self._system_with_memory(),
+                             temperature=chat_temp())
         while (c := self.thread_box.get_first_child()):
             self.thread_box.remove(c)
         self._memory_banner()
@@ -2053,6 +2091,11 @@ class ChatPage(Gtk.Box):
         self.entry.set_text("")
         self.busy = True
         self._bubble("user", text)
+        # the model reads Greek without accents badly — it is a 4B model and
+        # unaccented words tokenise into something else entirely. Accents are
+        # restored on the way out; guessing at misspellings is not, since
+        # "αθηνα" would become "φθηνά" and the answer would follow it.
+        text = predictor().accent_text(text)
         reply = self._bubble("bob", "…")
         self._working(True, f"Ο {chat_name()} γράφει…" if llm.server_running()
                       else "Φορτώνει το μοντέλο… (2,4 GB, μία φορά)")
@@ -2168,6 +2211,21 @@ class SettingsPage(Gtk.Box):
         bob.append(frame)
         # a flow box, not a row: five characters do not fit on one line at
         # every window width
+        self.temp_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 0.0, 1.4, 0.05)
+        self.temp_scale.set_value(chat_temp())
+        self.temp_scale.set_hexpand(True)
+        self.temp_val = dim(Gtk.Label(label=f"{chat_temp():.2f}"), small=False)
+        self.temp_scale.connect("value-changed", self._temp_changed)
+        temp_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        temp_row.append(Gtk.Label(label="Δημιουργικότητα", xalign=0))
+        temp_row.append(self.temp_scale)
+        temp_row.append(self.temp_val)
+        bob.append(temp_row)
+        bob.append(dim(Gtk.Label(
+            label="Χαμηλή = σταθερές, στεγνές απαντήσεις · υψηλή = πιο "
+                  "ελεύθερες και απρόβλεπτες", xalign=0, wrap=True)))
+
         chips = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,
                             column_spacing=6, row_spacing=6,
                             max_children_per_line=4)
@@ -2461,6 +2519,16 @@ class SettingsPage(Gtk.Box):
         buf = self.sys_view.get_buffer()
         return buf.get_text(*buf.get_bounds(), False).strip()
 
+    def _temp_changed(self, scale):
+        value = scale.get_value()
+        self.temp_val.set_label(f"{value:.2f}")
+        cfg = vk.load_config()
+        cfg["CHAT_TEMP"] = f"{value:.2f}"
+        vk.save_config(cfg)
+        page = self.win.pages.get("chat")
+        if page:
+            page.chat.temperature = value
+
     def _pick_persona(self, btn, name, prompt):
         """A ready-made character. The name travels with it, so the tab and
         the placeholder stop saying someone else's."""
@@ -2647,8 +2715,10 @@ class MemoryDialog(VoiceDialog):
         self.page = page
         store = page.store
 
-        if store.facts:
-            facts = Gtk.Label(label="👤 " + " · ".join(store.facts[-20:]),
+        if store.facts or store.facts_general:
+            shown = " · ".join(x for x in [store.facts_general] + store.facts
+                               if x)
+            facts = Gtk.Label(label="👤 " + shown,
                               xalign=0, wrap=True)
             facts.add_css_class("chat-memory")
             self.box.append(facts)
@@ -2664,7 +2734,8 @@ class MemoryDialog(VoiceDialog):
                 n.add_css_class("chat-note")
                 wrap.append(n)
             self.box.append(wrap)
-        if not store.summary and not notes and not store.facts:
+        if not (store.summary or notes or store.facts or
+                store.facts_general):
             self.box.append(dim(Gtk.Label(
                 label="Άδεια — κουβέντιασε και θα κρατήσει δύο λέξεις από "
                       "κάθε συζήτηση, μαζί με όσα στοιχεία πεις για σένα.",

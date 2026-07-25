@@ -393,6 +393,27 @@ class Predictor:
                         else (self._lookup(cand) or [word])[0])
         return best
 
+    def accent_text(self, text):
+        """Only put the accents back — never guess at a misspelling.
+
+        For text on its way to the model, a wrong guess is worse than a typo:
+        'αθηνα' became 'φθηνά' and the answer was about cheap things. This
+        touches a word only when the dictionary knows its exact letters.
+        """
+        out, pos = [], 0
+        for m in WORD_RE.finditer(text or ""):
+            word = m.group()
+            forms = self._lookup(_key(word))
+            fixed = word
+            if forms and word not in forms and len(word) >= MIN_LEN \
+                    and word[:1].islower():
+                fixed = forms[0]
+            out.append(text[pos:m.start()])
+            out.append(fixed)
+            pos = m.end()
+        out.append(text[pos:])
+        return "".join(out)
+
     def correct_text(self, text):
         """(corrected text, number of words changed). Punctuation, spacing and
         anything that is not a word are left exactly as they were."""
