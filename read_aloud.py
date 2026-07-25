@@ -33,9 +33,18 @@ def asset_dir(name):
 
 
 VOICES_DIR = asset_dir("voices")
+# Piper has no "large" Greek voice — the whole language is three files:
+# rapunzelina in low and medium, and joy in medium. Joy is fetched on demand
+# (63 MB) so first run stays as light as it was.
 VOICES = {
     "Μεσαία (πιο φυσική)": os.path.join(VOICES_DIR, "el_GR-rapunzelina-medium.onnx"),
     "Χαμηλή (πιο γρήγορη)": os.path.join(VOICES_DIR, "el_GR-rapunzelina-low.onnx"),
+    "Joy (άλλη φωνή)": os.path.join(VOICES_DIR, "el_GR-joy-medium.onnx"),
+}
+VOICE_BASE = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+              "el/el_GR")
+ON_DEMAND_VOICES = {                       # label -> (url stem, MB)
+    "Joy (άλλη φωνή)": (f"{VOICE_BASE}/joy/medium/el_GR-joy-medium", 63.5),
 }
 
 BG = "#1e1f2b"; FG = "#e6e6f0"; ACCENT = "#5b8cff"; PANEL = "#2a2c3d"

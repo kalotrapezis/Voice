@@ -36,6 +36,8 @@ from gi.repository import Gtk, Gdk, Gio, GLib, GObject, Pango
 
 # shared engines with the Tkinter app (no UI is created by importing these)
 import voice_keyboard as vk
+import predict
+import llm
 import read_aloud as ra
 import clipboard as clipmod
 import platform_io
@@ -68,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.5"
+VERSION = "0.0.6"
 
 
 _DARK = None
@@ -95,6 +97,13 @@ _ICONS = {
     "gear": ("Gear-Darklines", "Gear-white"),
     "pin": ("pin-dark", "pin-white"),
     "stop": ("stop-black", "stop-white"),
+}
+
+
+# roles without a hand-drawn SVG fall back to the theme's symbolic set
+_STOCK_ICONS = {
+    "notepad": "document-edit-symbolic",
+    "chat": "dialog-messages-symbolic",    # a speech bubble, not a pencil
 }
 
 
@@ -211,14 +220,39 @@ window.voice-main { background: @theme_bg_color; }
 .clip-card { border-radius: 12px; padding: 12px 8px 12px 14px; }
 .link-text { color: @theme_selected_bg_color; }
 
+/* mini bar sizes: the round buttons set the pill thickness, so each size is
+   their box plus matching padding (icon sizes live in MINI_SIZES) */
+.voice-mini.size-small .mini-round,
+.voice-mini.size-small button.flat { min-width: 22px; min-height: 22px; }
+.voice-mini.size-small label { font-size: 11px; }
+.voice-mini.size-medium .mini-round,
+.voice-mini.size-medium button.flat { min-width: 32px; min-height: 32px; }
+.voice-mini.size-medium label { font-size: 12px; }
+.voice-mini.size-large .mini-round,
+.voice-mini.size-large button.flat { min-width: 44px; min-height: 44px; }
+.voice-mini.size-small { border-radius: 14px; }
+.voice-mini.size-medium { border-radius: 20px; }
+.voice-mini.size-large { border-radius: 38px; }
+
 window.voice-mini {
   background: shade(@theme_bg_color, 0.99);
   border: 1px solid alpha(currentColor, 0.2);
-  border-radius: 38px;
+  border-radius: 14px;
 }
-window.voice-mini.expanded { border-radius: 20px; }
-.mini-round { border-radius: 9999px; min-width: 44px; min-height: 44px; }
-.mini-handle { padding: 4px 6px; }
+window.voice-mini.expanded { border-radius: 14px; }
+/* half the old height: the round buttons set the bar's thickness */
+.chat-bubble { padding: 8px 12px; border-radius: 12px; }
+.chat-me { background: alpha(@theme_selected_bg_color, 0.18); }
+.chat-bob { background: shade(@theme_bg_color, 0.97); }
+.suggest-strip {
+  background: @theme_base_color;
+  border: 1px solid alpha(currentColor, 0.2);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+.mini-round { border-radius: 9999px; padding: 0; }
+.mini-handle { padding: 0 4px; font-size: 10px; }
+.voice-mini button.flat { padding: 0; }
 .mini-round.destructive-action, .mini-round.record-red {
   background: #e01b24; color: #ffffff;
 }
@@ -650,6 +684,97 @@ def list_mic_sources():
         if len(cols) >= 2:
             devs.append(cols[1])
     return devs
+
+
+KWIN_RULES = os.path.expanduser("~/.config/kwinrulesrc")
+# rule id -> (description, window title it matches). KWin is the only thing on
+# Plasma that can put a window above others: GTK 4 dropped set_keep_above and
+# Wayland gives a client no say in stacking, so "Πάντα μπροστά" and the mini
+# bar are dead on this session unless we write the rule ourselves.
+KWIN_ABOVE_RULES = {
+    "voice-main-above": ("VOICE — πάντα μπροστά", "VOICE"),
+    "voice-mini-above": ("VOICE Mini — πάντα μπροστά", "VOICE Mini"),
+}
+
+
+# mini bar sizes: (icon px, outer margin, inner spacing). "large" is the
+# original bar, "small" the slim one — medium sits between them.
+MINI_SIZES = {
+    "small": (13, 2, 4),
+    "medium": (18, 6, 8),
+    "large": (22, 10, 10),
+}
+MINI_SIZE_LABELS = [("small", "Μικρό"), ("medium", "Μεσαίο"),
+                    ("large", "Μεγάλο")]
+
+
+def mini_size():
+    key = vk.load_config().get("MINI_SIZE", "medium")
+    return key if key in MINI_SIZES else "medium"
+
+
+def on_plasma():
+    return "kde" in (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+
+
+def kwin_keep_above(rule_id, enabled):
+    """Add or drop one KWin 'keep above' rule, then make KWin re-read them.
+
+    Edits ~/.config/kwinrulesrc in place with configparser so any rule the
+    user made by hand survives untouched."""
+    if not on_plasma():
+        return
+    import configparser
+    desc, title = KWIN_ABOVE_RULES[rule_id]
+    cp = configparser.RawConfigParser()
+    cp.optionxform = str                      # KWin's keys are case-sensitive
+    cp.read(KWIN_RULES, encoding="utf-8")
+    if enabled:
+        cp[rule_id] = {"Description": desc, "above": "true", "aboverule": "2",
+                       "title": title, "titlematch": "1"}
+    elif cp.has_section(rule_id):
+        cp.remove_section(rule_id)
+    ids = [s for s in cp.sections() if s != "General"]
+    if not cp.has_section("General"):
+        cp.add_section("General")
+    cp["General"]["count"] = str(len(ids))
+    cp["General"]["rules"] = ",".join(ids)
+    os.makedirs(os.path.dirname(KWIN_RULES), exist_ok=True)
+    with open(KWIN_RULES, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=False)
+    for qdbus in ("qdbus6", "qdbus"):
+        try:
+            subprocess.run([qdbus, "org.kde.KWin", "/KWin", "reconfigure"],
+                           capture_output=True, timeout=5)
+            break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+
+_PREDICTOR = None
+
+
+def chat_system():
+    """The user's system prompt, or Bob's default. Newlines are escaped in
+    the config file, which is strictly one key=value per line."""
+    raw = vk.load_config().get("CHAT_SYSTEM", "")
+    return raw.replace("\\n", "\n") if raw else llm.DEFAULT_SYSTEM
+
+
+def save_chat_system(text):
+    cfg = vk.load_config()
+    cfg["CHAT_SYSTEM"] = text.strip().replace("\n", "\\n")
+    vk.save_config(cfg)
+
+
+def predictor():
+    """Shared word predictor. Built on first use — the dictionary index is
+    only touched then, so a user who never opens the notepad never pays."""
+    global _PREDICTOR
+    if _PREDICTOR is None:
+        _PREDICTOR = predict.Predictor(
+            learned_path=os.path.join(ra.voice_data_dir(), "words.json"))
+    return _PREDICTOR
 
 
 def dim(label, small=True):
@@ -1280,6 +1405,492 @@ class ClipboardPage(Gtk.Box):
         ConfirmClearDialog(self.win).present()
 
 
+class NotepadPage(Gtk.Box):
+    """Page: Σημειωματάριο — a plain editor that predicts and corrects.
+
+    Inside our own window none of the AT-SPI guesswork applies: we own the
+    buffer, so the half-typed word is simply there. Space takes the first
+    suggestion (that is the whole interaction — no extra chord to learn), the
+    chips are clickable for the other two, and Escape dismisses them."""
+
+    def __init__(self, win):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.win = win
+        self.suggestions = []
+        self.picked = -1                   # which chip Tab has walked to
+        self.ai_phrases = []               # the model's continuations
+        self.ai_pending = False            # request in flight -> "…" chip
+        self.dismissed = False             # Esc hides ✨ until the next key
+        self.overlay_pos = (0, 0)
+
+        self.rec = Recorder()
+        self.transcriber = Transcriber()
+
+        self.mic_btn = svg_button("mic-on-white", 18,
+                                  ("destructive-action", "mini-round"))
+        self.mic_btn.set_tooltip_text("Υπαγόρευση μέσα στο σημείωμα")
+        self.mic_btn.connect("clicked", self._on_mic)
+        self.speak_btn = svg_button(icon_for("speaker"), 18, ("mini-round",))
+        self.speak_btn.set_tooltip_text("Ανάγνωση επιλογής ή όλου")
+        self.speak_btn.connect("clicked", self._on_speak)
+        paste = Gtk.Button(label="Επικόλληση")
+        paste.connect("clicked", self._on_paste)
+        fix = Gtk.Button(label="Διόρθωση")
+        fix.connect("clicked", self._on_correct)
+        self.ai_btn = Gtk.Button(label="Διόρθωση AI")
+        self.ai_btn.add_css_class("suggested-action")
+        self.ai_btn.set_tooltip_text(
+            "Διορθώνει και σύνταξη/νόημα με το τοπικό μοντέλο")
+        self.ai_btn.connect("clicked", self._on_correct_ai)
+        copy = Gtk.Button(label="Αντιγραφή")
+        copy.connect("clicked", self._on_copy)
+        self.append(page_header("Σημειωματάριο", self.mic_btn,
+                                self.speak_btn, paste, fix, self.ai_btn,
+                                copy))
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       margin_top=14, margin_bottom=14,
+                       margin_start=26, margin_end=26)
+
+        self.view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                 left_margin=12, right_margin=12,
+                                 top_margin=10, bottom_margin=10)
+        self.buf = self.view.get_buffer()
+        self.buf.connect("changed", self._on_changed)
+        self.buf.connect("mark-set", lambda *_: self._update_counts())
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key)
+        self.view.add_controller(keys)
+        frame = Gtk.Box(vexpand=True)
+        frame.add_css_class("voice-card")
+        frame.append(scrolled(self.view))
+        body.append(frame)
+
+        # Suggestions ride under the caret as a TextView overlay, not as a
+        # popover: on Wayland a popover is its own surface and the compositor
+        # places it where it likes — on Plasma it landed over the sidebar,
+        # nowhere near the cursor. An overlay lives in buffer coordinates,
+        # scrolls with the text and cannot steal focus.
+        self.chips = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.chips.add_css_class("suggest-strip")
+        self.chips.set_visible(False)
+        self.view.add_overlay(self.chips, 0, 0)
+
+        self.hint = dim(Gtk.Label(label="", xalign=0, hexpand=True),
+                        small=False)
+        self.counts = dim(Gtk.Label(label="λέξεις 0 · χαρακτήρες 0"),
+                          small=False)
+        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        status.append(self.hint)
+        status.append(self.counts)
+        body.append(status)
+        self.append(body)
+
+    # ---- prediction
+    def _word_before_cursor(self):
+        """(prefix, start iter, end iter) for the word being typed."""
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        start = end.copy()
+        while start.backward_char():
+            if not start.get_char().isalpha():
+                start.forward_char()
+                break
+        return self.buf.get_text(start, end, False), start, end
+
+    def _prev_word(self, start):
+        """The word before the one being typed — context for the ranking."""
+        head = self.buf.get_text(self.buf.get_start_iter(), start, False)
+        words = predict.WORD_RE.findall(head[-60:])
+        return words[-1] if words else None
+
+    def _on_changed(self, *_):
+        self._update_counts()
+        prefix, start, _ = self._word_before_cursor()
+        self.suggestions = (predictor().suggest(prefix, prev=self._prev_word(start))
+                            if prefix else
+                            predictor().next_words(self._prev_word(start)))
+        self.ai_phrases = []               # a keystroke invalidates the guess
+        self.ai_pending = False
+        self.dismissed = False             # typing again brings ✨ back
+        self.picked = -1                   # a fresh word highlights nothing
+        self._show_chips()
+
+    def _has_context(self):
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        return bool(self.buf.get_text(self.buf.get_start_iter(),
+                                      end, False).strip())
+
+    def _chip_items(self):
+        """[(label, action, kind)] — words on one row, phrases stacked below.
+
+        kind is 'word' (goes in the top row) or 'phrase' (its own row): a
+        whole sentence next to three words never fitted the width."""
+        items = [(w, lambda w=w: self._accept(w), "word")
+                 for w in self.suggestions]
+        if (llm.available() and not self.dismissed and not self.ai_pending
+                and not self.ai_phrases and self._has_context()):
+            items.append(("✨", self._ask_ai, "word"))
+        if self.ai_pending:
+            items.append(("✨ …", lambda: None, "phrase"))
+        for phrase in self.ai_phrases:
+            shown = phrase.strip()
+            if len(shown) > 70:
+                shown = shown[:69].rsplit(" ", 1)[0] + "…"
+            items.append(("✨ " + shown,
+                          lambda p=phrase: self._accept_raw(p), "phrase"))
+        return items
+
+    def _show_chips(self):
+        while (c := self.chips.get_first_child()):
+            self.chips.remove(c)
+        if not self._chip_items():
+            self.chips.set_visible(False)
+            return
+        row = None
+        for i, (label, action, kind) in enumerate(self._chip_items()):
+            b = Gtk.Button(label=label)
+            b.add_css_class("suggested-action" if i == self.picked
+                            else "kbd-chip")
+            b.connect("clicked", lambda _b, a=action: a())
+            if kind == "word":
+                if row is None:
+                    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=6)
+                    self.chips.append(row)
+                row.append(b)
+            else:                          # one phrase per line, left-aligned
+                b.set_halign(Gtk.Align.START)
+                b.get_child().set_xalign(0)
+                self.chips.append(b)
+        self._point_at_caret()
+        self.chips.set_visible(True)
+
+    # the strip sits this far below the caret: pinned to the caret box itself
+    # it covered the line being written
+    CARET_GAP = 6
+
+    def _point_at_caret(self):
+        """Move the strip under the caret. get_iter_location already gives
+        buffer coordinates, which is exactly what move_overlay wants."""
+        it = self.buf.get_iter_at_mark(self.buf.get_insert())
+        r = self.view.get_iter_location(it)
+        self.overlay_pos = (r.x, r.y + max(r.height, 1) + self.CARET_GAP)
+        self.view.move_overlay(self.chips, *self.overlay_pos)
+
+    def _accept(self, word):
+        prefix, start, end = self._word_before_cursor()
+        if not prefix:
+            return
+        self.buf.delete(start, end)
+        self.buf.insert_at_cursor(word + " ")
+        self._dismiss()
+        self.view.grab_focus()
+
+    def _on_key(self, ctl, keyval, keycode, state):
+        """Tab walks the suggestions, Enter takes one, Esc drops them.
+
+        Nothing is inserted until Enter, so Tab is safe to lean on: you can
+        look at all three and still end up typing your own word."""
+        items = self._chip_items()
+        if not items:
+            return False
+        if keyval == Gdk.KEY_Escape:
+            self._dismiss()
+            return True
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab):
+            step = -1 if keyval == Gdk.KEY_ISO_Left_Tab else 1
+            if self.picked < 0:            # -1 + -1 would land on the middle
+                self.picked = 0 if step > 0 else len(items) - 1
+            else:
+                self.picked = (self.picked + step) % len(items)
+            self._show_chips()
+            return True                    # never a literal tab in the note
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.picked >= 0:
+            items[self.picked][1]()
+            return True                    # and no newline either
+        return False
+
+    def _dismiss(self):
+        self.suggestions = []
+        self.ai_phrases = []
+        self.ai_pending = False
+        self.dismissed = True              # Esc means "leave me alone"
+        self.picked = -1
+        self._show_chips()
+
+    def _accept_raw(self, text):
+        """Insert the AI's continuation verbatim — it is the next words, not
+        a replacement for the one being typed."""
+        self.buf.insert_at_cursor(text)
+        self._dismiss()
+        self.view.grab_focus()
+
+    def _ask_ai(self):
+        """The ✨ chip: what would the model write next, given the note.
+
+        Asked for, never on a timer — a background run every time you pause
+        spends 4 s of sixteen threads on a guess you did not want."""
+        if not llm.available() or llm.ram_check()[0] == "block":
+            return
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        context = self.buf.get_text(self.buf.get_start_iter(), end, False)
+        if not context.strip():
+            return
+        self.ai_pending = True             # the "…" chip, so the wait is seen
+        self._show_chips()
+
+        def work():
+            if not llm.server_running() and not llm.start_server():
+                GLib.idle_add(self._ai_suggested, context, [])
+                return
+            GLib.idle_add(self._ai_suggested, context,
+                          llm.next_phrases(context))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_suggested(self, context, phrases):
+        self.ai_pending = False
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        now = self.buf.get_text(self.buf.get_start_iter(), end, False)
+        if now != context:                 # kept typing: the guess is stale
+            self._show_chips()
+            return
+        self.ai_phrases = phrases
+        self._show_chips()
+
+    # ---- counts
+    def _update_counts(self):
+        text = self.buf.get_text(*self.buf.get_bounds(), False)
+        label = f"λέξεις {len(text.split())} · χαρακτήρες {len(text)}"
+        sel = self.buf.get_selection_bounds()
+        if sel:
+            picked = self.buf.get_text(sel[0], sel[1], False)
+            label = (f"λέξεις {len(text.split())} ({len(picked.split())})"
+                     f" · χαρακτήρες {len(text)} ({len(picked)})")
+        self.counts.set_label(label)
+
+    # ---- actions
+    def _on_paste(self, btn):
+        self.get_clipboard().read_text_async(None, self._pasted)
+
+    def _pasted(self, clipboard, result):
+        try:
+            text = clipboard.read_text_finish(result)
+        except GLib.Error:
+            return
+        if text:
+            self.buf.insert_at_cursor(text)
+            predictor().learn(text)
+
+    def _on_copy(self, btn):
+        self.get_clipboard().set(
+            self.buf.get_text(*self.buf.get_bounds(), False))
+
+    def _on_correct_ai(self, btn):
+        """Context-aware pass. Runs off the main loop — 12 s a paragraph
+        would freeze the window, and the note must stay readable meanwhile."""
+        if not llm.available():
+            self.hint.set_label(
+                "Το μοντέλο AI δεν έχει ληφθεί — Ρυθμίσεις → Διόρθωση AI")
+            return
+        status, msg = llm.ram_check()
+        if status == "block":
+            InfoDialog(self.win, "Δεν υπάρχει αρκετή μνήμη", msg).present()
+            return
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        text = self.buf.get_text(start, end, False)
+        if not text.strip():
+            return
+        self.ai_btn.set_sensitive(False)
+        self.hint.set_label("Διόρθωση AI… (κρατάει λίγο)")
+
+        def work():
+            fixed = llm.correct(text, on_progress=lambda i, n: GLib.idle_add(
+                self.hint.set_label, f"Διόρθωση AI… {i}/{n}"))
+            GLib.idle_add(self._ai_done, text, fixed)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_done(self, original, fixed):
+        self.ai_btn.set_sensitive(True)
+        if not fixed or fixed == original:
+            self.hint.set_label("Καμία αλλαγή από το AI")
+            return
+        # re-resolve the range: the note may have been edited while it ran
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        if self.buf.get_text(start, end, False) != original:
+            self.hint.set_label("Το κείμενο άλλαξε — η διόρθωση ακυρώθηκε")
+            return
+        self.buf.delete(start, end)
+        self.buf.insert(start, fixed)
+        predictor().learn(fixed)
+        self.hint.set_label("Έγινε διόρθωση AI")
+
+    # ---- voice, into and out of the note
+    def _on_mic(self, btn):
+        """Dictate straight into the note. Continuous with pause detection:
+        in an editor you talk in phrases, and each one lands at the cursor."""
+        if self.rec.running:
+            self.rec.stop()
+            self.transcriber.cancel()      # or phrases keep landing after stop
+            self.mic_btn.set_child(svg_icon("mic-on-white", 18))
+            self.hint.set_label("")
+            return
+        dev = self.win.settings().mic_device()
+        self.rec.start(dev, on_segment=self._on_segment, vad=True)
+        self.mic_btn.set_child(svg_icon("stop-white", 16))
+        self.hint.set_label("Ακούω… μίλα και γράφεται στον κέρσορα")
+
+    def _on_segment(self, pcm):
+        self.transcriber.submit(pcm, self.win.settings().dict_lang(),
+                                self._dictated)
+
+    def _dictated(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        self.buf.insert_at_cursor(text + " ")
+        predictor().learn(text)
+
+    def _on_speak(self, btn):
+        tts = self.win.app.tts
+        if tts.speaking:                   # the button doubles as stop
+            tts.stop()
+            return
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        text = self.buf.get_text(start, end, False).strip()
+        if not text:
+            self.hint.set_label("Δεν υπάρχει κείμενο για ανάγνωση")
+            return
+        st = self.win.settings()
+        tts.speak(text, st.voice_model(), st.speed())
+
+    def _on_correct(self, btn):
+        """Fix the selection, or the whole note when nothing is selected."""
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        text = self.buf.get_text(start, end, False)
+        fixed, n = predictor().correct_text(text)
+        if n:
+            self.buf.delete(start, end)
+            self.buf.insert(start, fixed)
+        predictor().learn(fixed)
+        self.hint.set_label(f"Διορθώθηκαν {n} λέξεις" if n
+                            else "Καμία διόρθωση — όλα σωστά")
+        self._show_chips() if self.suggestions else None
+
+
+class ChatPage(Gtk.Box):
+    """Page: Bob — a local chat with the same model the notepad uses."""
+
+    def __init__(self, win):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.win = win
+        self.chat = llm.Chat(system=chat_system())
+        self.busy = False
+
+        clear = Gtk.Button(label="Καθαρισμός")
+        clear.connect("clicked", lambda *_: self.reset())
+        self.append(page_header("Bob", clear))
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       margin_top=14, margin_bottom=14,
+                       margin_start=26, margin_end=26)
+        self.thread_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=8, margin_top=10, margin_bottom=10,
+                                  margin_start=10, margin_end=10)
+        card = Gtk.Box(vexpand=True)
+        card.add_css_class("voice-card")
+        self.scroll = scrolled(self.thread_box)
+        card.append(self.scroll)
+        body.append(card)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.entry = Gtk.Entry(hexpand=True,
+                               placeholder_text="Γράψε στον Bob…")
+        self.entry.connect("activate", lambda *_: self._send())
+        send = Gtk.Button(label="Αποστολή")
+        send.add_css_class("suggested-action")
+        send.connect("clicked", lambda *_: self._send())
+        row.append(self.entry)
+        row.append(send)
+        body.append(row)
+
+        self.spinner = Gtk.Spinner()
+        self.status = dim(Gtk.Label(label="", xalign=0), small=False)
+        foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        foot.append(self.spinner)
+        foot.append(self.status)
+        body.append(foot)
+        self.append(body)
+
+    def _working(self, on, message=""):
+        self.spinner.set_spinning(on)
+        self.status.set_label(message)
+
+    # ---- conversation
+    def reset(self):
+        self.chat.reset()
+        self.chat.system = chat_system()
+        while (c := self.thread_box.get_first_child()):
+            self.thread_box.remove(c)
+        self._working(False)
+
+    def _bubble(self, who, text):
+        lbl = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
+        lbl.add_css_class("chat-bubble")
+        lbl.add_css_class("chat-me" if who == "user" else "chat-bob")
+        lbl.set_halign(Gtk.Align.END if who == "user" else Gtk.Align.START)
+        self.thread_box.append(lbl)
+        GLib.idle_add(self._scroll_down)
+        return lbl
+
+    def _scroll_down(self):
+        adj = self.scroll.get_vadjustment()
+        adj.set_value(adj.get_upper() - adj.get_page_size())
+        return False
+
+    def _send(self):
+        text = self.entry.get_text().strip()
+        if not text or self.busy:
+            return
+        if not llm.available():
+            self.status.set_label(
+                "Το μοντέλο δεν έχει ληφθεί — Ρυθμίσεις → Διόρθωση AI")
+            return
+        if llm.ram_check()[0] == "block":
+            self.status.set_label(llm.ram_check()[1])
+            return
+        self.entry.set_text("")
+        self.busy = True
+        self._bubble("user", text)
+        reply = self._bubble("bob", "…")
+        self._working(True, "Ο Bob γράφει…" if llm.server_running()
+                      else "Φορτώνει το μοντέλο… (2,4 GB, μία φορά)")
+
+        def work():
+            if not llm.server_running() and not llm.start_server():
+                GLib.idle_add(self._done, reply, "")
+                return
+            acc = []
+
+            def token(piece):
+                acc.append(piece)
+                GLib.idle_add(reply.set_label, "".join(acc))
+                GLib.idle_add(self._scroll_down)
+            out = self.chat.send(text, on_token=token)
+            GLib.idle_add(self._done, reply, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, bubble, text):
+        self.busy = False
+        self._working(False)
+        bubble.set_label(text or "…δεν κατάφερα να απαντήσω, συγγνώμη.")
+        self._scroll_down()
+
+
 class SettingsPage(Gtk.Box):
     """Page: Ρυθμίσεις — grouped GNOME-style settings cards."""
 
@@ -1299,6 +1910,10 @@ class SettingsPage(Gtk.Box):
             "Mini λειτουργία",
             "Όταν κλείνεις το παράθυρο, εμφανίζεται μια μικρή μπάρα "
             "(🎤 🔊 📋) πάνω από όλα", self.mini_toggle))
+        self.mini_size_drop = dropdown([l for _, l in MINI_SIZE_LABELS])
+        gen.append(settings_row(
+            "Μέγεθος mini μπάρας",
+            "Μεγάλο είναι η αρχική μπάρα, μικρό η λεπτή", self.mini_size_drop))
         self.top_toggle = Gtk.Switch()
         gen.append(settings_row(
             "Πάντα μπροστά",
@@ -1312,20 +1927,77 @@ class SettingsPage(Gtk.Box):
                                 dropdown(["Ενεργό παράθυρο"])))
         self.lang_drop = dropdown(list(LANGS.keys()))
         dic.append(settings_row("Γλώσσα", None, self.lang_drop))
+        self.stt_keys = list(vk.WHISPER_MODELS)
+        self.stt_drop = dropdown([vk.WHISPER_MODELS[k][3]
+                                  for k in self.stt_keys])
+        self.stt_sub = dim(Gtk.Label(label="", xalign=0, wrap=True))
+        stt_row = settings_row("Μοντέλο υπαγόρευσης (whisper)", None,
+                               self.stt_drop)
+        dic.append(stt_row)
+        sub_box = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
+        sub_box.append(self.stt_sub)
+        dic.append(sub_box)
         self.deliver_toggle = Gtk.Switch(active=True)
         dic.append(settings_row("Παράδοση στην εφαρμογή", None,
                                 self.deliver_toggle))
+        self.cont_toggle = Gtk.Switch()
         dic.append(settings_row("Συνεχής λειτουργία (γράφει στις παύσεις)",
-                                None, Gtk.Switch()))
+                                None, self.cont_toggle))
         dic.append(settings_row("Εμφάνιση πλαισίου κειμένου", None,
                                 Gtk.Switch(), divider=False))
+        ai = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.ai_status = dim(Gtk.Label(label="", xalign=0, wrap=True))
+        self.ai_get = Gtk.Button()
+        self.ai_get.connect("clicked", self._on_get_llm)
+        ai.append(settings_row(
+            "Μοντέλο διόρθωσης", "Τοπικό, offline — διορθώνει σύνταξη και "
+            "νόημα στο Σημειωματάριο", self.ai_get, divider=False))
+        sub_ai = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
+        sub_ai.append(self.ai_status)
+        ai.append(sub_ai)
+        bob = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      margin_top=12, margin_bottom=12,
+                      margin_start=14, margin_end=12)
+        self.sys_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                     left_margin=8, right_margin=8,
+                                     top_margin=6, bottom_margin=6)
+        self.sys_view.get_buffer().set_text(chat_system())
+        frame = Gtk.Box()
+        frame.add_css_class("voice-card")
+        frame.append(self.sys_view)
+        self.sys_view.set_size_request(-1, 110)
+        bob.append(dim(Gtk.Label(
+            label="Οδηγίες χαρακτήρα — τι είναι ο Bob και πώς απαντά",
+            xalign=0)))
+        bob.append(frame)
+        acts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                       halign=Gtk.Align.END)
+        default_btn = Gtk.Button(label="Προεπιλογή")
+        default_btn.connect("clicked", self._reset_system)
+        clear_btn = Gtk.Button(label="Καθαρισμός συνομιλίας")
+        clear_btn.connect("clicked", self._clear_chat)
+        save_btn = Gtk.Button(label="Αποθήκευση")
+        save_btn.add_css_class("suggested-action")
+        save_btn.connect("clicked", self._save_system)
+        for b in (default_btn, clear_btn, save_btn):
+            acts.append(b)
+        bob.append(acts)
+        self.bob_status = dim(Gtk.Label(label="", xalign=0))
+        bob.append(self.bob_status)
+        body.append(group("🤖  Bob (συνομιλία)",
+                          "Ο χαρακτήρας του και η μνήμη της κουβέντας", bob))
+
+        body.append(group("🧠  Διόρθωση AI",
+                          "Το βαρύ μοντέλο που διαβάζει ολόκληρη πρόταση", ai))
+
         body.append(group("🎤  Υπαγόρευση",
                           "Πώς συμπεριφέρεται η υπαγόρευση φωνής", dic))
 
         # Ανάγνωση
         rd = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.voice_drop = dropdown(list(ra.VOICES.keys()))
-        rd.append(settings_row("Φωνή", None, self.voice_drop))
+        rd.append(settings_row("Φωνή ανάγνωσης (piper)", None,
+                               self.voice_drop))
         self.speed_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 0.5, 2.0, 0.05)
         self.speed_scale.set_value(1.0)
@@ -1385,7 +2057,9 @@ class SettingsPage(Gtk.Box):
         feat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.feature_toggles = {}
         feats = [("dictation", "🎤  Υπαγόρευση"), ("read", "📖  Ανάγνωση"),
-                 ("meeting", "📝  Σύσκεψη"), ("clipboard", "📋  Πρόχειρο")]
+                 ("meeting", "📝  Σύσκεψη"), ("notepad", "📝  Σημειωματάριο"),
+                 ("chat", "💬  Chat (Bob)"),
+                 ("clipboard", "📋  Πρόχειρο")]
         for i, (key, label) in enumerate(feats):
             sw = Gtk.Switch(active=True)
             sw.connect("notify::active",
@@ -1431,6 +2105,11 @@ class SettingsPage(Gtk.Box):
             if value in values:
                 drop.set_selected(values.index(value))
         self.mini_toggle.set_active(cfg.get("MINI", "1") == "1")
+        keys = [k for k, _ in MINI_SIZE_LABELS]
+        self.mini_size_drop.set_selected(
+            keys.index(mini_size()) if mini_size() in keys else 1)
+        self.mini_size_drop.connect("notify::selected",
+                                    lambda *_: self._mini_size_changed())
         self.top_toggle.set_active(cfg.get("TOPMOST", "0") == "1")
         self.deliver_toggle.set_active(cfg.get("DELIVER", "1") == "1")
         sel(self.lang_drop, cfg.get("LANG", "el"), list(LANGS.values()))
@@ -1438,6 +2117,19 @@ class SettingsPage(Gtk.Box):
             list(LANGS.values()))
         sel(self.voice_drop, cfg.get("VOICE", ""), list(ra.VOICES.keys()))
         self.meet_src_drop.set_selected(int(cfg.get("MEET_SRC", "0") or 0))
+        # the switch on the dictation card is the single source of truth —
+        # the settings one was a mockup leftover wired to nothing
+        self.cont_toggle.set_active(cfg.get("CONT", "0") == "1")
+        self.cont_toggle.bind_property(
+            "active", self.win.pages["dictation"].mode_toggle, "active",
+            GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
+        self._stt_key = cfg.get("STT_MODEL", "small")
+        if self._stt_key not in self.stt_keys:
+            self._stt_key = "small"
+        self.stt_drop.set_selected(self.stt_keys.index(self._stt_key))
+        self._stt_describe()
+        self.stt_drop.connect("notify::selected", self._stt_changed)
+        self._llm_describe()
         try:
             self.speed_scale.set_value(float(cfg.get("SPEED", "1.0")))
         except ValueError:
@@ -1454,8 +2146,10 @@ class SettingsPage(Gtk.Box):
 
         # persist on any change (after initial values are in place)
         for w in (self.mini_toggle, self.top_toggle, self.deliver_toggle,
-                  *self.feature_toggles.values()):
+                  self.cont_toggle, *self.feature_toggles.values()):
             w.connect("notify::active", lambda *_: self._persist())
+        self.voice_drop.connect("notify::selected",
+                                lambda *_: self._voice_changed())
         for d in (self.lang_drop, self.meet_lang_drop, self.voice_drop,
                   self.meet_src_drop, self.mic_drop):
             d.connect("notify::selected", lambda *_: self._persist())
@@ -1464,12 +2158,25 @@ class SettingsPage(Gtk.Box):
         self.top_toggle.connect("notify::active",
                                 lambda *_: self.win.apply_topmost())
 
+    def _mini_size_changed(self):
+        """Persist, then rebuild the bar — size is baked in at construction."""
+        cfg = vk.load_config()
+        cfg["MINI_SIZE"] = MINI_SIZE_LABELS[
+            self.mini_size_drop.get_selected()][0]
+        vk.save_config(cfg)
+        app = self.win.app
+        if app.mini is not None and app.mini.get_visible():
+            app.mini.close()
+            app.mini = None
+            app.show_mini()
+
     def _persist(self):
         cfg = vk.load_config()
         cfg.update(
             MINI="1" if self.mini_toggle.get_active() else "0",
             TOPMOST="1" if self.top_toggle.get_active() else "0",
             DELIVER="1" if self.deliver_toggle.get_active() else "0",
+            CONT="1" if self.cont_toggle.get_active() else "0",
             LANG=self.dict_lang(), MEET_LANG=self.meet_lang(),
             VOICE=list(ra.VOICES.keys())[self.voice_drop.get_selected()],
             MEET_SRC=str(self.meet_src_drop.get_selected()),
@@ -1479,6 +2186,115 @@ class SettingsPage(Gtk.Box):
         for key, sw in self.feature_toggles.items():
             cfg[f"FEAT_{key.upper()}"] = "1" if sw.get_active() else "0"
         vk.save_config(cfg)
+
+    # ---- speech model (download + RAM gating)
+    def _stt_describe(self):
+        key = self._stt_key
+        _, dl_gb, need, _, note = vk.WHISPER_MODELS[key]
+        status, msg = vk.model_ram_check(key)
+        if msg:
+            self.stt_sub.set_label(("⚠  " if status == "warn" else "⛔  ") + msg)
+        else:
+            self.stt_sub.set_label(
+                f"{note} · ~{need:.1f} GB RAM · λήψη {dl_gb:.1f} GB"
+                + ("" if vk.model_installed(key) else " (δεν έχει ληφθεί)"))
+
+    def _stt_revert(self):
+        self.stt_drop.set_selected(self.stt_keys.index(self._stt_key))
+
+    def _stt_accept(self, key):
+        self._stt_key = key
+        cfg = vk.load_config()
+        cfg["STT_MODEL"] = key
+        vk.save_config(cfg)
+        self._stt_describe()
+
+    def _stt_changed(self, *_):
+        i = self.stt_drop.get_selected()
+        if i == Gtk.INVALID_LIST_POSITION:
+            return
+        key = self.stt_keys[i]
+        if key == self._stt_key:
+            return
+        status, msg = vk.model_ram_check(key)
+        if status == "block":
+            self._stt_revert()
+            InfoDialog(self.win, "Δεν υπάρχει αρκετή μνήμη", msg).present()
+            return
+        if not vk.model_installed(key):
+            self._stt_revert()
+            ModelDownloadDialog(self.win, key, msg,
+                                on_done=lambda: self._stt_accept(key)).present()
+            return
+        self._stt_accept(key)
+
+    def _voice_changed(self):
+        """Fetch a voice the first time it is picked (only Joy is on demand)."""
+        label = list(ra.VOICES)[self.voice_drop.get_selected()]
+        path = ra.VOICES[label]
+        spec = ra.ON_DEMAND_VOICES.get(label)
+        if not spec or os.path.exists(path):
+            return
+        stem, mb = spec
+        ModelDownloadDialog(
+            self.win, label, "", url=stem + ".onnx", dest=path,
+            spec=(mb / 1000, 0.2, label, "Ελληνική φωνή για την ανάγνωση"),
+            on_done=lambda: threading.Thread(
+                target=vk._download,
+                args=(stem + ".onnx.json", path + ".json",
+                      lambda *_: None), daemon=True).start()).present()
+
+    # ---- Bob
+    def _system_text(self):
+        buf = self.sys_view.get_buffer()
+        return buf.get_text(*buf.get_bounds(), False).strip()
+
+    def _save_system(self, btn):
+        text = self._system_text()
+        save_chat_system(text)
+        page = self.win.pages.get("chat")
+        if page:                           # takes effect on the next message
+            page.chat.system = text or llm.DEFAULT_SYSTEM
+        self.bob_status.set_label("Αποθηκεύτηκε")
+
+    def _reset_system(self, btn):
+        self.sys_view.get_buffer().set_text(llm.DEFAULT_SYSTEM)
+        self._save_system(btn)
+
+    def _clear_chat(self, btn):
+        page = self.win.pages.get("chat")
+        if page:
+            page.reset()
+        self.bob_status.set_label("Η συνομιλία και η μνήμη καθαρίστηκαν")
+
+    # ---- correction model
+    def _llm_describe(self):
+        _, dl_gb, need, label, note, _ = llm.LLM_MODELS[llm.DEFAULT_MODEL]
+        have = llm.installed()
+        self.ai_get.set_label("Ληφθέν ✓" if have else "Λήψη…")
+        self.ai_get.set_sensitive(not have)
+        status, msg = llm.ram_check()
+        if not llm.binary():
+            self.ai_status.set_label(
+                "Δεν βρέθηκε το llama.cpp σε αυτή την εγκατάσταση.")
+        elif msg:
+            self.ai_status.set_label(
+                ("⚠  " if status == "warn" else "⛔  ") + msg)
+        else:
+            self.ai_status.set_label(
+                f"{label} · {note} · λήψη {dl_gb:.1f} GB · ~{need:.1f} GB RAM"
+                + ("" if have else " (δεν έχει ληφθεί)"))
+
+    def _on_get_llm(self, btn):
+        key = llm.DEFAULT_MODEL
+        _, dl_gb, need, label, note, url = llm.LLM_MODELS[key]
+        status, msg = llm.ram_check()
+        if status == "block":
+            InfoDialog(self.win, "Δεν υπάρχει αρκετή μνήμη", msg).present()
+            return
+        ModelDownloadDialog(self.win, key, msg, on_done=self._llm_describe,
+                            url=url, dest=llm.model_path(key),
+                            spec=(dl_gb, need, label, note)).present()
 
     def _set_shortcut(self, key, combo):
         self.sc_chips[key].set_label(combo or "—")
@@ -1601,6 +2417,95 @@ class TargetDialog(VoiceDialog):
         self.action_bar(cancel, ok)
 
 
+class InfoDialog(VoiceDialog):
+    """One message + Εντάξει. Used for the RAM refusal."""
+
+    def __init__(self, parent, title, message):
+        super().__init__(parent, title, 460)
+        self.box.append(dim(Gtk.Label(label=message, xalign=0, wrap=True),
+                            small=False))
+        ok = Gtk.Button(label="Εντάξει")
+        ok.add_css_class("suggested-action")
+        ok.connect("clicked", lambda *_: self.close())
+        self.action_bar(ok)
+
+
+class ModelDownloadDialog(VoiceDialog):
+    """Confirm + download a whisper model, with the RAM warning up front.
+
+    The worker thread never touches widgets — it hands progress to the GTK
+    main loop via GLib.idle_add (same rule as the Tkinter first-run dialog)."""
+
+    def __init__(self, parent, key, warning, on_done=None, url=None,
+                 dest=None, spec=None):
+        dl_gb, need, label, note = spec or vk.WHISPER_MODELS[key][1:]
+        super().__init__(parent, "Λήψη μοντέλου", 470)
+        self.key, self.on_done = key, on_done
+        self.url = url or f"{vk.HF_WHISPER}/{vk.WHISPER_MODELS[key][0]}"
+        self.dest = dest or vk.model_path(key)
+
+        self.box.append(dim(Gtk.Label(
+            label=f"{label} — {note}\nΛήψη ~{dl_gb:.1f} GB · χρειάζεται "
+                  f"~{need:.1f} GB RAM στη χρήση.",
+            xalign=0, wrap=True), small=False))
+        if warning:
+            w = Gtk.Label(label="⚠  " + warning, xalign=0, wrap=True)
+            w.add_css_class("accent-text")
+            self.box.append(w)
+
+        self.status = dim(Gtk.Label(label="", xalign=0), small=False)
+        self.bar = Gtk.ProgressBar(hexpand=True)
+        self.bar.set_visible(False)
+        self.box.append(self.status)
+        self.box.append(self.bar)
+
+        self.cancel = Gtk.Button(label="Άκυρο")
+        self.cancel.connect("clicked", lambda *_: self.close())
+        self.go = Gtk.Button(label="Λήψη")
+        self.go.add_css_class("suggested-action")
+        self.go.connect("clicked", self._start)
+        self.action_bar(self.cancel, self.go)
+
+    def _start(self, btn):
+        self.go.set_sensitive(False)
+        self.cancel.set_sensitive(False)
+        self.bar.set_visible(True)
+        self.status.set_label("Σύνδεση…")
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def _work(self):
+        dest = self.dest
+        try:
+            vk._download(self.url, dest,
+                         lambda done, total: GLib.idle_add(
+                             self._progress, done, total))
+        except Exception as e:                      # network / disk / timeout
+            try:
+                os.remove(dest + ".part")
+            except OSError:
+                pass
+            GLib.idle_add(self._failed, str(e))
+            return
+        GLib.idle_add(self._finished)
+
+    def _progress(self, done, total):
+        self.bar.set_fraction(done / total if total else 0.0)
+        self.status.set_label(f"{done / 1e9:0.2f} GB"
+                              + (f" / {total / 1e9:0.2f} GB" if total else ""))
+
+    def _failed(self, err):
+        self.bar.set_visible(False)
+        self.status.set_label(f"Η λήψη απέτυχε: {err}")
+        self.cancel.set_label("Κλείσιμο")
+        self.cancel.set_sensitive(True)
+        self.go.set_sensitive(True)
+
+    def _finished(self):
+        if self.on_done:
+            self.on_done()
+        self.close()
+
+
 class ShortcutDialog(VoiceDialog):
     """Ορισμός συντόμευσης — dashed accent capture box; records the next
     key combination pressed and hands it to on_save."""
@@ -1690,7 +2595,9 @@ def show_about(parent):
     about = Gtk.AboutDialog(
         transient_for=parent, modal=True,
         program_name="VOICE",
-        version=f"v{VERSION} · Φωνή, τοπικά & offline",
+        # no bare "&" here: AboutDialog parses this as Pango markup, and a
+        # markup error makes GTK silently fall back to "version 1.0"
+        version=f"v{VERSION} · Φωνή, τοπικά, offline",
         comments="Ελληνική υπαγόρευση, ανάγνωση, μεταγραφή συσκέψεων και "
                  "πρόχειρο — όλα στη συσκευή σου.",
         website="https://github.com/kalotrapezis",
@@ -1712,28 +2619,31 @@ class MiniWindow(Gtk.Window):
         self.set_icon_name("voice")
         self.main_win = main_win
         self.add_css_class("voice-mini")
+        self.size_key = mini_size()
+        self.add_css_class("size-" + self.size_key)
+        ico, pad, gap = MINI_SIZES[self.size_key]
         self.expanded = False
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                        margin_top=10, margin_bottom=10,
-                        margin_start=14, margin_end=10)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=gap - 2,
+                        margin_top=pad, margin_bottom=pad,
+                        margin_start=pad + 4, margin_end=pad + 2)
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=gap)
         handle = Gtk.Label(label="⠿")
         dim(handle, small=False)
         handle.add_css_class("mini-handle")
         bar.append(handle)
 
-        self.mic_btn = svg_button("mic-on-white", 22,
+        self.mic_btn = svg_button("mic-on-white", ico,
                                   ("destructive-action", "mini-round"))
         self.mic_btn.connect("clicked", self._mini_mic)
         bar.append(self.mic_btn)
 
-        self.speak_btn = svg_button(icon_for("speaker"), 22, ("mini-round",))
+        self.speak_btn = svg_button(icon_for("speaker"), ico, ("mini-round",))
         self.speak_btn.connect("clicked", self._mini_speak)
         bar.append(self.speak_btn)
 
-        self.clip_btn = svg_button(icon_for("clip"), 22, ("mini-round",))
+        self.clip_btn = svg_button(icon_for("clip"), ico, ("mini-round",))
         self.clip_btn.connect("clicked", self._toggle_clip)
         bar.append(self.clip_btn)
 
@@ -1828,8 +2738,9 @@ class MiniWindow(Gtk.Window):
         page = self.main_win.pages["dictation"]
         page._on_record(btn)
         rec = page.rec.running
-        self.mic_btn.set_child(
-            svg_icon("stop-white" if rec else "mic-on-white", 22))
+        self.mic_btn.set_child(svg_icon(
+            "stop-white" if rec else "mic-on-white",
+            MINI_SIZES[self.size_key][0]))
         self.status.set_label("Εγγραφή…" if rec else "Έτοιμο")
 
     def _mini_speak(self, btn):
@@ -1844,7 +2755,8 @@ class MiniWindow(Gtk.Window):
     def _speak_state(self, state):
         playing = state == "playing"
         self.speak_btn.set_child(svg_icon(
-            icon_for("stop") if playing else icon_for("speaker"), 22))
+            icon_for("stop") if playing else icon_for("speaker"),
+            MINI_SIZES[self.size_key][0]))
         self.status.set_label("Διαβάζω…" if playing else "Έτοιμο")
         return False
 
@@ -1874,6 +2786,8 @@ class MainWindow(Gtk.ApplicationWindow):
     PAGES = [("dictation", "Υπαγόρευση", "mic"),
              ("read", "Ανάγνωση", "speaker"),
              ("meeting", "Σύσκεψη", "meeting"),
+             ("notepad", "Σημειωματάριο", "notepad"),
+             ("chat", "Chat (Bob)", "chat"),
              ("clipboard", "Πρόχειρο", "clip")]
 
     def __init__(self, app):
@@ -1932,13 +2846,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.stack = Gtk.Stack(hexpand=True, vexpand=True)
         GLib.timeout_add(500, lambda: self.stack.set_transition_type(
             Gtk.StackTransitionType.CROSSFADE) or False)
-        self.pages = {
-            "dictation": DictationPage(self),
-            "read": ReadPage(self),
-            "meeting": MeetingPage(self),
-            "clipboard": ClipboardPage(self),
-            "settings": SettingsPage(self),
-        }
+        # built one at a time, not as a dict literal: SettingsPage reaches for
+        # self.pages["dictation"] while constructing, and a literal would only
+        # bind self.pages after every page was already built
+        self.pages = {}
+        for key, cls in (("dictation", DictationPage), ("read", ReadPage),
+                         ("meeting", MeetingPage), ("notepad", NotepadPage),
+                         ("chat", ChatPage),
+                         ("clipboard", ClipboardPage),
+                         ("settings", SettingsPage)):
+            self.pages[key] = cls(self)
         for key, page in self.pages.items():
             self.stack.add_named(page, key)
         body.append(self.stack)
@@ -1963,13 +2880,16 @@ class MainWindow(Gtk.ApplicationWindow):
         return False
 
     def apply_topmost(self):
-        """Keep-above for the main window. GTK4 has no API for this: X11 →
-        wmctrl; Wayland → needs a KWin window rule (title 'VOICE')."""
+        """Keep-above for the main window. GTK 4 has no API for it: X11 →
+        wmctrl, Plasma → a KWin rule we write ourselves (note: on Wayland the
+        client cannot ask, so without the rule the switch did nothing)."""
+        on = self.settings().top_toggle.get_active()
         if os.environ.get("XDG_SESSION_TYPE") == "x11":
-            mode = "add" if self.settings().top_toggle.get_active() \
-                else "remove"
-            subprocess.run(["wmctrl", "-r", "VOICE", "-b", f"{mode},above"],
+            subprocess.run(["wmctrl", "-r", "VOICE", "-b",
+                            f"{'add' if on else 'remove'},above"],
                            capture_output=True)
+        else:
+            kwin_keep_above("voice-main-above", on)
         return False
 
     def settings(self):
@@ -2002,21 +2922,42 @@ class MainWindow(Gtk.ApplicationWindow):
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         role = "gear" if icon == "settings-gear" else icon
-        box.append(svg_icon(icon_for(role), 18))
+        if role in _ICONS:
+            box.append(svg_icon(icon_for(role), 18))
+        else:                              # no SVG drawn for these two yet
+            img = Gtk.Image.new_from_icon_name(
+                _STOCK_ICONS.get(role, "document-edit-symbolic"))
+            img.set_pixel_size(18)
+            box.append(img)
         box.append(Gtk.Label(label=label, xalign=0))
         row.set_child(box)
         row.page_key = key
         self.nav_rows[key] = row
         return row
 
+    # pages that may hold the 2.4 GB model open
+    AI_PAGES = ("chat", "notepad")
+
     def _on_nav(self, listbox, row):
         if row is not None:
             self.stack.set_visible_child_name(row.page_key)
+            self._release_model(row.page_key)
+
+    def _release_model(self, page_key):
+        """Leaving Bob and the notepad frees the weights. Nobody expects a
+        chat tab they walked away from to keep 2.4 GB resident."""
+        if page_key in self.AI_PAGES:
+            return
+        chat = self.pages.get("chat")
+        if chat is not None and chat.busy:        # a reply is still streaming
+            return
+        threading.Thread(target=llm.stop_server, daemon=True).start()
 
     def show_page(self, key):
         if key in ("settings",):
             self.nav.unselect_all()
         self.stack.set_visible_child_name(key)
+        self._release_model(key)
 
     def set_feature(self, key, enabled):
         """Feature toggle: hide the page everywhere (design note_1)."""
@@ -2057,6 +2998,7 @@ class VoiceApp(Gtk.Application):
             self.tts.stop()
         except Exception:
             pass
+        llm.stop_server()                 # 2.4 GB must not outlive the app
         Gtk.Application.do_shutdown(self)
 
     def do_activate(self):
@@ -2148,14 +3090,15 @@ class VoiceApp(Gtk.Application):
         if expand_clip and not self.mini.expanded:
             self.mini._toggle_clip(None)
         self.mini.present()
-        # Always-on-top: GTK4 has no set_keep_above; X11 → wmctrl fallback,
-        # Wayland → KWin window rule for "VOICE Mini".
-        GLib.timeout_add(300, self._keep_above_x11)
+        # The mini bar floats over everything by definition — no setting.
+        GLib.timeout_add(300, self._keep_mini_above)
 
-    def _keep_above_x11(self):
+    def _keep_mini_above(self):
         if os.environ.get("XDG_SESSION_TYPE") == "x11":
             subprocess.run(["wmctrl", "-r", "VOICE Mini", "-b",
                             "add,above"], capture_output=True)
+        else:
+            kwin_keep_above("voice-mini-above", True)
         return False
 
 

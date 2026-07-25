@@ -7,9 +7,11 @@
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-# upstream version 0.0.5, packaging revision "b" (desktop-disruption, duplicate
-# text, mini-bar and theme-icon fixes)
-VERSION="${VERSION:-0.0.5-b}"
+# One version, one place: voice_gtk.py's VERSION is what the sidebar and the
+# About dialog show, so the package takes it from there too. Three hand-kept
+# copies had already drifted into three different numbers on the same install.
+VERSION="${VERSION:-$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$PROJ/voice_gtk.py")}"
+[ -n "$VERSION" ] || { echo "✗ no VERSION in voice_gtk.py"; exit 1; }
 ARCH="${ARCH:-amd64}"
 PKG="voice_${VERSION}_${ARCH}"
 OUT="$PROJ/build/deb"
@@ -36,6 +38,9 @@ install -m644 "$PROJ/voice_gtk.py"      "$APP/"
 install -m644 "$PROJ/read_aloud.py"     "$APP/"
 install -m644 "$PROJ/platform_io.py"    "$APP/"
 install -m644 "$PROJ/clipboard.py"      "$APP/"
+install -m644 "$PROJ/predict.py"        "$APP/"
+install -m644 "$PROJ/llm.py"            "$APP/"
+install -Dm644 "$PROJ/data/el_freq.txt" "$APP/data/el_freq.txt"
 install -Dm644 "$PROJ/Assets/VoiceIcon.png" "$APP/Assets/VoiceIcon.png"
 # icon set used by the GTK 4 UI
 install -d "$APP/Assets/SVGs"
@@ -48,6 +53,27 @@ cp -a "$PROJ/piper_tts" "$APP/"
 install -m755 "$PROJ/whisper.cpp/build/bin/whisper-cli" "$APP/whisper.cpp/build/bin/"
 cp -aP "$PROJ"/whisper.cpp/build/src/libwhisper.so*    "$APP/whisper.cpp/build/src/"
 cp -aP "$PROJ"/whisper.cpp/build/ggml/src/libggml*.so* "$APP/whisper.cpp/build/ggml/src/"
+
+# llama-completion + its libs, when built (optional: the AI correction is the
+# only thing that needs it, and the model is fetched on demand anyway)
+if [ -x "$PROJ/llama.cpp/build/bin/llama-completion" ]; then
+  install -d "$APP/llama.cpp/build/bin"
+  install -m755 "$PROJ/llama.cpp/build/bin/llama-completion" \
+    "$APP/llama.cpp/build/bin/"
+  [ -x "$PROJ/llama.cpp/build/bin/llama-server" ] && \
+    install -m755 "$PROJ/llama.cpp/build/bin/llama-server" \
+      "$APP/llama.cpp/build/bin/"
+  cp -aP "$PROJ"/llama.cpp/build/bin/*.so* "$APP/llama.cpp/build/bin/"
+  if command -v patchelf >/dev/null 2>&1; then
+    for b in llama-completion llama-server; do
+      [ -x "$APP/llama.cpp/build/bin/$b" ] && \
+        patchelf --set-rpath '$ORIGIN' "$APP/llama.cpp/build/bin/$b" || true
+    done
+  fi
+  echo "  · llama-completion bundled ($(du -sh "$APP/llama.cpp" | cut -f1))"
+else
+  echo "  · llama.cpp not built — AI correction will be unavailable"
+fi
 
 # make the bundled whisper relocatable if patchelf is available (the launcher
 # sets LD_LIBRARY_PATH too, so this is belt-and-suspenders)

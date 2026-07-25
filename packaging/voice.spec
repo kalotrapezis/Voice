@@ -7,7 +7,8 @@
 %global __requires_exclude ^(libwhisper|libggml.*|libpiper_phonemize|libonnxruntime|libespeak-ng)\\.so.*$
 
 Name:           voice
-Version:        0.0.5
+# kept in step with voice_gtk.py VERSION by build_rpm.sh
+Version:        0.0.6~beta7
 Release:        1%{?dist}
 Summary:        Greek voice keyboard & read-aloud (offline STT/TTS) for Linux (KDE/Cinnamon)
 
@@ -54,6 +55,9 @@ install -m644 %{projdir}/voice_keyboard.py $APP/
 install -m644 %{projdir}/read_aloud.py    $APP/
 install -m644 %{projdir}/platform_io.py   $APP/
 install -m644 %{projdir}/clipboard.py     $APP/
+install -m644 %{projdir}/predict.py       $APP/
+install -m644 %{projdir}/llm.py           $APP/
+install -Dm644 %{projdir}/data/el_freq.txt $APP/data/el_freq.txt
 install -Dm644 %{projdir}/Assets/VoiceIcon.png $APP/Assets/VoiceIcon.png
 cp -a %{projdir}/piper_tts $APP/
 
