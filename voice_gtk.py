@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta14"
+VERSION = "0.0.6~beta15"
 
 
 _DARK = None
@@ -1395,7 +1395,9 @@ class NotepadPage(Gtk.Box):
         self.win = win
         self.suggestions = []
         self.picked = -1                   # which chip Tab has walked to
-        self.ai_text = ""                  # the model's continuation, if asked
+        self.ai_phrases = []               # the model's continuations
+        self.ai_pending = False            # request in flight -> "…" chip
+        self._idle_id = None               # pause timer
         self.overlay_pos = (0, 0)
 
         self.rec = Recorder()
@@ -1485,25 +1487,29 @@ class NotepadPage(Gtk.Box):
         self.suggestions = (predictor().suggest(prefix, prev=self._prev_word(start))
                             if prefix else
                             predictor().next_words(self._prev_word(start)))
-        self.ai_text = ""                  # a keystroke invalidates the guess
+        self.ai_phrases = []               # a keystroke invalidates the guess
+        self.ai_pending = False
         self.picked = -1                   # a fresh word highlights nothing
+        self._restart_idle_timer()
         self._show_chips()
 
     def _chip_items(self):
-        """[(label, action)] — dictionary words, then the AI continuation."""
+        """[(label, action)] — dictionary words first, then AI phrases."""
         items = [(w, lambda w=w: self._accept(w)) for w in self.suggestions]
-        if self.ai_text:
-            shown = self.ai_text.strip()
+        if self.ai_pending:
+            items.append(("…", lambda: None))
+        for phrase in self.ai_phrases:
+            shown = phrase.strip()
             if len(shown) > 46:            # a whole phrase, trimmed to fit
                 shown = shown[:45].rsplit(" ", 1)[0] + "…"
             items.append(("✨ " + shown,
-                          lambda: self._accept_raw(self.ai_text)))
+                          lambda p=phrase: self._accept_raw(p)))
         return items
 
     def _show_chips(self):
         while (c := self.chips.get_first_child()):
             self.chips.remove(c)
-        if not self.suggestions and not self.ai_text:
+        if not self._chip_items():
             self.chips.set_visible(False)
             return
         for i, (label, action) in enumerate(self._chip_items()):
@@ -1541,9 +1547,6 @@ class NotepadPage(Gtk.Box):
 
         Nothing is inserted until Enter, so Tab is safe to lean on: you can
         look at all three and still end up typing your own word."""
-        if keyval == Gdk.KEY_space and (state & Gdk.ModifierType.CONTROL_MASK):
-            self._ask_ai()
-            return True
         items = self._chip_items()
         if not items:
             return False
@@ -1565,8 +1568,12 @@ class NotepadPage(Gtk.Box):
 
     def _dismiss(self):
         self.suggestions = []
-        self.ai_text = ""
+        self.ai_phrases = []
+        self.ai_pending = False
         self.picked = -1
+        if self._idle_id:                  # Esc means "leave me alone"
+            GLib.source_remove(self._idle_id)
+            self._idle_id = None
         self._show_chips()
 
     def _accept_raw(self, text):
@@ -1576,40 +1583,51 @@ class NotepadPage(Gtk.Box):
         self._dismiss()
         self.view.grab_focus()
 
+    # a pause this long means "I am thinking", which is when a suggested
+    # continuation helps — and it is why this is not a shortcut: Ctrl+Space
+    # is the keyboard-layout switch on this desktop
+    IDLE_SECONDS = 3
+
+    def _restart_idle_timer(self):
+        if self._idle_id:
+            GLib.source_remove(self._idle_id)
+            self._idle_id = None
+        if llm.available():
+            self._idle_id = GLib.timeout_add_seconds(self.IDLE_SECONDS,
+                                                     self._on_idle)
+
+    def _on_idle(self):
+        self._idle_id = None
+        self._ask_ai()
+        return False
+
     def _ask_ai(self):
-        """Ctrl+Space: what would the model write next, given the note."""
-        if not llm.available():
-            self.hint.set_label(
-                "Το μοντέλο AI δεν έχει ληφθεί — Ρυθμίσεις → Διόρθωση AI")
-            return
-        if llm.ram_check()[0] == "block":
-            self.hint.set_label(llm.ram_check()[1])
+        """After the pause: what would the model write next, given the note."""
+        if not llm.available() or llm.ram_check()[0] == "block":
             return
         end = self.buf.get_iter_at_mark(self.buf.get_insert())
         context = self.buf.get_text(self.buf.get_start_iter(), end, False)
         if not context.strip():
             return
-        self.hint.set_label("AI γράφει τη συνέχεια…" if llm.server_running()
-                            else "Ξεκινάει το AI… (μία φορά)")
+        self.ai_pending = True             # the "…" chip, so the wait is seen
+        self._show_chips()
 
         def work():
             if not llm.server_running() and not llm.start_server():
-                GLib.idle_add(self.hint.set_label, "Το AI δεν ξεκίνησε")
+                GLib.idle_add(self._ai_suggested, context, [])
                 return
             GLib.idle_add(self._ai_suggested, context,
-                          llm.next_words(context))
+                          llm.next_phrases(context))
         threading.Thread(target=work, daemon=True).start()
 
-    def _ai_suggested(self, context, text):
-        self.hint.set_label("")
-        if not text:
-            return
+    def _ai_suggested(self, context, phrases):
+        self.ai_pending = False
         end = self.buf.get_iter_at_mark(self.buf.get_insert())
         now = self.buf.get_text(self.buf.get_start_iter(), end, False)
         if now != context:                 # kept typing: the guess is stale
+            self._show_chips()
             return
-        self.ai_text = text
-        self.picked = len(self.suggestions)
+        self.ai_phrases = phrases
         self._show_chips()
 
     # ---- counts
@@ -1960,6 +1978,8 @@ class SettingsPage(Gtk.Box):
         for w in (self.mini_toggle, self.top_toggle, self.deliver_toggle,
                   self.cont_toggle, *self.feature_toggles.values()):
             w.connect("notify::active", lambda *_: self._persist())
+        self.voice_drop.connect("notify::selected",
+                                lambda *_: self._voice_changed())
         for d in (self.lang_drop, self.meet_lang_drop, self.voice_drop,
                   self.meet_src_drop, self.mic_drop):
             d.connect("notify::selected", lambda *_: self._persist())
@@ -2037,6 +2057,22 @@ class SettingsPage(Gtk.Box):
                                 on_done=lambda: self._stt_accept(key)).present()
             return
         self._stt_accept(key)
+
+    def _voice_changed(self):
+        """Fetch a voice the first time it is picked (only Joy is on demand)."""
+        label = list(ra.VOICES)[self.voice_drop.get_selected()]
+        path = ra.VOICES[label]
+        spec = ra.ON_DEMAND_VOICES.get(label)
+        if not spec or os.path.exists(path):
+            return
+        stem, mb = spec
+        ModelDownloadDialog(
+            self.win, label, "", url=stem + ".onnx", dest=path,
+            spec=(mb / 1000, 0.2, label, "Ελληνική φωνή για την ανάγνωση"),
+            on_done=lambda: threading.Thread(
+                target=vk._download,
+                args=(stem + ".onnx.json", path + ".json",
+                      lambda *_: None), daemon=True).start()).present()
 
     # ---- correction model
     def _llm_describe(self):

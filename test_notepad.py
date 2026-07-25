@@ -89,13 +89,21 @@ def main():
     # while a dictionary chip replaces the half-typed word
     p.buf.set_text("θέλει δουλειά πολ")
     p._on_changed()
-    p.ai_text = "λή"
+    p.ai_phrases = ["λή"]
     p.picked = len(p.suggestions)                      # the ✨ chip
     labels = [lbl for lbl, _ in p._chip_items()]
     assert labels[-1].startswith("✨"), labels
     assert p._on_key(None, Gdk.KEY_Return, 0, 0) is True
     assert p.buf.get_text(*p.buf.get_bounds(), False) == "θέλει δουλειά πολλή"
-    assert p.ai_text == "" and p.suggestions == []
+    assert p.ai_phrases == [] and p.suggestions == []
+
+    # while the model is thinking, a "…" chip stands in for the answer
+    p.buf.set_text("θέλει δουλειά πολ")
+    p._on_changed()
+    p.ai_pending = True
+    assert "…" in [lbl for lbl, _ in p._chip_items()]
+    p._dismiss()
+    assert p._chip_items() == [] and p._idle_id is None
 
     # with nothing typed, the chips become next-word guesses from pairs
     g.predictor().learn("θέλει δουλειά πολλή. θέλει δουλειά ακόμα.")

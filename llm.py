@@ -18,6 +18,7 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -162,7 +163,10 @@ def start_server(timeout=120):
         return False
     _PORT = _free_port()
     _SERVER = subprocess.Popen(
-        [exe, "-m", model_path(), "-t", str(vk.THREADS), "-c", "2048",
+        [exe, "-m", model_path(), "-t", str(vk.THREADS), "-c", "4096",
+         # three slots so three continuations are generated at once instead
+         # of one after the other
+         "--parallel", "3",
          "--host", "127.0.0.1", "--port", str(_PORT)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     atexit.register(stop_server)
@@ -192,7 +196,7 @@ def stop_server():
     _SERVER = None
 
 
-def next_words(context, words=8, timeout=30):
+def next_words(context, words=8, timeout=30, temperature=0, seed=-1):
     """What the model would write next — '' when it has nothing or is off.
 
     A phrase, not a word: the dictionary already completes words, and with a
@@ -201,7 +205,8 @@ def next_words(context, words=8, timeout=30):
     if not context.strip() or not server_running():
         return ""
     body = json.dumps({"prompt": context[-600:], "n_predict": words * 4,
-                       "temperature": 0, "stop": ["\n"]}).encode()
+                       "temperature": temperature, "seed": seed,
+                       "stop": ["\n"]}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{_PORT}/completion", body,
                                  {"Content-Type": "application/json"})
     try:
@@ -215,6 +220,35 @@ def next_words(context, words=8, timeout=30):
     lead = text[:len(text) - len(text.lstrip())]
     body = " ".join(text.split()[:words])
     return (lead + body) if body else ""
+
+
+def next_phrases(context, count=3, words=8, timeout=40):
+    """`count` different continuations, generated in parallel.
+
+    Sampled rather than greedy — three greedy runs would return the same
+    sentence three times — with the seed varied per slot."""
+    if not context.strip() or not server_running():
+        return []
+    out = [None] * count
+    threads = []
+
+    def one(i):
+        out[i] = next_words(context, words=words, timeout=timeout,
+                            temperature=0.8, seed=i + 1)
+
+    for i in range(count):
+        t = threading.Thread(target=one, args=(i,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout)
+    seen, phrases = set(), []
+    for text in out:
+        key = (text or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            phrases.append(text)
+    return phrases
 
 
 def demo():
@@ -253,6 +287,14 @@ def demo():
             mid = next_words("Για να γυρίσει ο ήλιος θέλει δουλειά πολ")
             print("μισή λέξη:", repr(mid))
             assert not mid.startswith(" "), mid
+
+            # three continuations, generated together and actually different
+            t0 = time.time()
+            three = next_phrases("Καλημέρα σας, σας γράφω σχετικά με")
+            print(f"τρεις προτάσεις σε {time.time() - t0:.1f}s:")
+            for ph in three:
+                print("   ·", ph.strip())
+            assert len(three) >= 2, three
             stop_server()
             assert not server_running()
     print("ok")
