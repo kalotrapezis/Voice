@@ -1634,7 +1634,8 @@ class SettingsPage(Gtk.Box):
         self.stt_drop = dropdown([vk.WHISPER_MODELS[k][3]
                                   for k in self.stt_keys])
         self.stt_sub = dim(Gtk.Label(label="", xalign=0, wrap=True))
-        stt_row = settings_row("Μοντέλο αναγνώρισης", None, self.stt_drop)
+        stt_row = settings_row("Μοντέλο υπαγόρευσης (whisper)", None,
+                               self.stt_drop)
         dic.append(stt_row)
         sub_box = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
         sub_box.append(self.stt_sub)
@@ -1653,7 +1654,8 @@ class SettingsPage(Gtk.Box):
         # Ανάγνωση
         rd = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.voice_drop = dropdown(list(ra.VOICES.keys()))
-        rd.append(settings_row("Φωνή", None, self.voice_drop))
+        rd.append(settings_row("Φωνή ανάγνωσης (piper)", None,
+                               self.voice_drop))
         self.speed_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 0.5, 2.0, 0.05)
         self.speed_scale.set_value(1.0)
