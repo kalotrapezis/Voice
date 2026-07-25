@@ -71,7 +71,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.7~beta1"
+VERSION = "0.0.7~beta2"
 
 
 _DARK = None
@@ -2121,20 +2121,28 @@ class SettingsPage(Gtk.Box):
         bob = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                       margin_top=12, margin_bottom=12,
                       margin_start=14, margin_end=12)
+        # hexpand/vexpand are load-bearing: without them the text view keeps
+        # its natural size — a thin strip in the top-left corner of the card —
+        # and clicking anywhere else in the white area did nothing at all, so
+        # the box looked broken and never showed a caret
         self.sys_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                      left_margin=8, right_margin=8,
-                                     top_margin=6, bottom_margin=6)
+                                     top_margin=6, bottom_margin=6,
+                                     hexpand=True, vexpand=True)
         self.sys_view.get_buffer().set_text(chat_system())
         frame = Gtk.Box()
         frame.add_css_class("voice-card")
-        frame.append(self.sys_view)
-        self.sys_view.set_size_request(-1, 110)
+        frame.append(scrolled(self.sys_view))
+        frame.set_size_request(-1, 120)
         bob.append(dim(Gtk.Label(
             label="Οδηγίες χαρακτήρα — τι είναι ο Bob και πώς απαντά",
             xalign=0)))
         bob.append(frame)
         acts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                        halign=Gtk.Align.END)
+        edit_btn = Gtk.Button(label="Επεξεργασία")
+        edit_btn.connect("clicked",
+                         lambda *_: self.sys_view.grab_focus())
         default_btn = Gtk.Button(label="Προεπιλογή")
         default_btn.connect("clicked", self._reset_system)
         clear_btn = Gtk.Button(label="Καθαρισμός συνομιλίας")
@@ -2142,7 +2150,7 @@ class SettingsPage(Gtk.Box):
         save_btn = Gtk.Button(label="Αποθήκευση")
         save_btn.add_css_class("suggested-action")
         save_btn.connect("clicked", self._save_system)
-        for b in (default_btn, clear_btn, save_btn):
+        for b in (edit_btn, default_btn, clear_btn, save_btn):
             acts.append(b)
         bob.append(acts)
         self.bob_status = dim(Gtk.Label(label="", xalign=0))
