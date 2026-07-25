@@ -16,6 +16,7 @@ import atexit
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import threading
@@ -141,6 +142,10 @@ def correct(text, timeout=180, on_progress=lambda done, total: None):
 # holds the weights answers in under 1.5 s.
 _SERVER = None
 _PORT = None
+# Two threads can want the model at the same moment — the notepad's ✨ and a
+# chat message. Without this lock both spawned a server, and the second one
+# overwrote the handle to the first, which then survived exit.
+_LOCK = threading.RLock()
 
 
 def _free_port():
@@ -156,24 +161,27 @@ def server_running():
 def start_server(timeout=120):
     """Boot llama-server on a private port. True once it answers /health."""
     global _SERVER, _PORT
-    if server_running():
-        return True
-    exe = binary("llama-server")
-    if not exe or not installed():
-        return False
-    _PORT = _free_port()
-    _SERVER = subprocess.Popen(
-        [exe, "-m", model_path(), "-t", str(vk.THREADS),
-         "-c", str(SERVER_CTX),
-         # three slots so three continuations are generated at once instead
-         # of one after the other
-         "--parallel", "3",
-         "--host", "127.0.0.1", "--port", str(_PORT)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    atexit.register(stop_server)
+    with _LOCK:                            # one server, whoever asks first
+        if server_running():
+            return True
+        exe = binary("llama-server")
+        if not exe or not installed():
+            return False
+        _PORT = _free_port()
+        _SERVER = subprocess.Popen(
+            [exe, "-m", model_path(), "-t", str(vk.THREADS),
+             "-c", str(SERVER_CTX),
+             # three slots so three continuations are generated at once
+             # instead of one after the other
+             "--parallel", "3",
+             "--host", "127.0.0.1", "--port", str(_PORT)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)        # own group, so it dies as one
+        atexit.register(stop_server)
+        proc = _SERVER
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _SERVER.poll() is not None:            # died on startup
+        if proc.poll() is not None:        # died on startup
             return False
         try:
             with urllib.request.urlopen(
@@ -187,14 +195,24 @@ def start_server(timeout=120):
 
 
 def stop_server():
+    """Kill the server and anything it spawned — 2.4 GB of weights must not
+    outlive the page that asked for them, let alone the app."""
     global _SERVER
-    if server_running():
-        _SERVER.terminate()
+    with _LOCK:
+        proc, _SERVER = _SERVER, None
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except OSError:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
         try:
-            _SERVER.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _SERVER.kill()
-    _SERVER = None
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            proc.kill()
 
 
 # Gemma 3 itself takes 128k tokens; the limit here is RAM. 16384 across three
@@ -331,10 +349,146 @@ def next_phrases(context, count=3, words=8, timeout=40):
     return phrases
 
 
+# ---------------------------------------------------------------- chat
+DEFAULT_SYSTEM = (
+    "Είσαι ένας αβέβαιος βοηθός. Το όνομά σου είναι «Bob», αλλά δεν είσαι "
+    "σίγουρος γι' αυτό. Δίνεις απαντήσεις, ποτέ όμως με βεβαιότητα: πάντα "
+    "εκφράζεις αβεβαιότητα και αμηχανία.")
+CHAT_WINDOW = 5000           # tokens of conversation kept verbatim
+MEMORY_LIMIT = 2000          # tokens of system prompt + running summary
+
+
+def approx_tokens(text):
+    """Rough token count. Greek runs about three characters per token, and
+    this only has to decide when to summarise, not to fit a hard limit."""
+    return max(1, len(text or "") // 3)
+
+
+class Chat:
+    """A conversation that never outgrows the model's window.
+
+    Old turns are folded into a running summary once the transcript passes
+    CHAT_WINDOW tokens; when the system prompt plus that summary themselves
+    pass MEMORY_LIMIT, the summary is summarised again."""
+
+    def __init__(self, system=None):
+        self.system = system or DEFAULT_SYSTEM
+        self.turns = []                   # [(role, text)] role: user|model
+        self.summary = ""
+
+    # ---- memory
+    def reset(self):
+        self.turns = []
+        self.summary = ""
+
+    def _tokens(self, extra=""):
+        return sum(approx_tokens(t) for _, t in self.turns) + \
+            approx_tokens(self.summary) + approx_tokens(self.system) + \
+            approx_tokens(extra)
+
+    def _fold_old_turns(self):
+        """Summarise the oldest half of the transcript into `summary`."""
+        keep = max(2, len(self.turns) // 2)
+        old, self.turns = self.turns[:-keep], self.turns[-keep:]
+        if not old:
+            return
+        text = "\n".join(f"{'Χρήστης' if r == 'user' else 'Bob'}: {t}"
+                          for r, t in old)
+        self.summary = _ask(
+            "Σύνοψη της συνομιλίας σε 3-4 προτάσεις. Κράτα ονόματα, αριθμούς "
+            "και ό,τι ζήτησε ο χρήστης.\n\n"
+            + (f"Παλαιότερα: {self.summary}\n\n" if self.summary else "")
+            + text, n_predict=220) or self.summary
+
+    def _compress_memory(self):
+        """The summary itself has grown too long — squeeze it."""
+        self.summary = _ask(
+            "Συμπύκνωσε τη σύνοψη σε 2 προτάσεις, κρατώντας μόνο τα ουσιώδη."
+            f"\n\n{self.summary}", n_predict=140) or self.summary[:600]
+
+    # ---- prompting
+    def _prompt(self, message):
+        head = self.system
+        if self.summary:
+            head += f"\n\n[Όσα ειπώθηκαν ως τώρα: {self.summary}]"
+        parts, first = [], True
+        for role, text in self.turns + [("user", message)]:
+            if role == "user":
+                body = f"{head}\n\n{text}" if first else text
+                first = False
+                parts.append(f"<start_of_turn>user\n{body}<end_of_turn>\n")
+            else:
+                parts.append(f"<start_of_turn>model\n{text}<end_of_turn>\n")
+        return "".join(parts) + "<start_of_turn>model\n"
+
+    def send(self, message, n_predict=400, timeout=180, on_token=None):
+        """Ask Bob. Returns his reply ('' if the model is not running).
+
+        `on_token` is called with each piece as it arrives: a CPU writes ~20
+        tokens a second, so a full answer takes 15-20 s and watching it
+        appear beats staring at a spinner."""
+        if not server_running():
+            return ""
+        if self._tokens(message) > CHAT_WINDOW:
+            self._fold_old_turns()
+        if approx_tokens(self.system) + approx_tokens(self.summary) > \
+                MEMORY_LIMIT:
+            self._compress_memory()
+        reply = _ask(self._prompt(message), n_predict=n_predict,
+                     timeout=timeout, raw=True, on_token=on_token)
+        if reply:
+            self.turns += [("user", message), ("model", reply)]
+        return reply
+
+
+def _ask(prompt, n_predict=200, timeout=120, temperature=0.7, raw=False,
+         on_token=None):
+    """One completion. `raw` sends the prompt as built; otherwise it is
+    wrapped in a single user turn. With `on_token` the answer is streamed."""
+    if not server_running():
+        return ""
+    if not raw:
+        prompt = (f"<start_of_turn>user\n{prompt}<end_of_turn>\n"
+                  "<start_of_turn>model\n")
+    body = json.dumps({"prompt": prompt, "n_predict": n_predict,
+                       "temperature": temperature,
+                       "stream": bool(on_token)}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{_PORT}/completion", body,
+                                 {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if not on_token:
+                return json.load(r).get("content", "").strip()
+            out = []
+            for line in r:                 # server-sent events: "data: {...}"
+                line = line.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    piece = json.loads(line[5:]).get("content", "")
+                except ValueError:
+                    continue
+                if piece:
+                    out.append(piece)
+                    on_token(piece)
+            return "".join(out).strip()
+    except (urllib.error.URLError, OSError, ValueError):
+        return ""
+
+
 def demo():
     print("binary:", binary() or "—")
     print("model :", model_path(), "✓" if installed() else "(δεν έχει ληφθεί)")
     print("ram   :", ram_check())
+
+    # the chat window folds old turns into a summary instead of growing
+    chat = Chat()
+    assert chat._tokens() == approx_tokens(chat.system)
+    chat.turns = [("user", "α" * 9000), ("model", "β" * 9000)]
+    assert chat._tokens() > CHAT_WINDOW
+    chat.reset()
+    assert chat.turns == [] and chat.summary == ""
+    assert chat.send("κάτι") == "" or server_running()   # quiet with no server
 
     # half a sentence is worse than a short one
     assert _end_at_sentence("Πρώτη πρόταση. Δεύτερη μισ") == "Πρώτη πρόταση."

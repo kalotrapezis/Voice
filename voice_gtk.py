@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta17"
+VERSION = "0.0.6~beta19"
 
 
 _DARK = None
@@ -234,6 +234,9 @@ window.voice-mini {
 }
 window.voice-mini.expanded { border-radius: 14px; }
 /* half the old height: the round buttons set the bar's thickness */
+.chat-bubble { padding: 8px 12px; border-radius: 12px; }
+.chat-me { background: alpha(@theme_selected_bg_color, 0.18); }
+.chat-bob { background: shade(@theme_bg_color, 0.97); }
 .suggest-strip {
   background: @theme_base_color;
   border: 1px solid alpha(currentColor, 0.2);
@@ -742,6 +745,19 @@ def kwin_keep_above(rule_id, enabled):
 
 
 _PREDICTOR = None
+
+
+def chat_system():
+    """The user's system prompt, or Bob's default. Newlines are escaped in
+    the config file, which is strictly one key=value per line."""
+    raw = vk.load_config().get("CHAT_SYSTEM", "")
+    return raw.replace("\\n", "\n") if raw else llm.DEFAULT_SYSTEM
+
+
+def save_chat_system(text):
+    cfg = vk.load_config()
+    cfg["CHAT_SYSTEM"] = text.strip().replace("\n", "\\n")
+    vk.save_config(cfg)
 
 
 def predictor():
@@ -1759,6 +1775,115 @@ class NotepadPage(Gtk.Box):
         self._show_chips() if self.suggestions else None
 
 
+class ChatPage(Gtk.Box):
+    """Page: Bob — a local chat with the same model the notepad uses."""
+
+    def __init__(self, win):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.win = win
+        self.chat = llm.Chat(system=chat_system())
+        self.busy = False
+
+        clear = Gtk.Button(label="Καθαρισμός")
+        clear.connect("clicked", lambda *_: self.reset())
+        self.append(page_header("Bob", clear))
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       margin_top=14, margin_bottom=14,
+                       margin_start=26, margin_end=26)
+        self.thread_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=8, margin_top=10, margin_bottom=10,
+                                  margin_start=10, margin_end=10)
+        card = Gtk.Box(vexpand=True)
+        card.add_css_class("voice-card")
+        self.scroll = scrolled(self.thread_box)
+        card.append(self.scroll)
+        body.append(card)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.entry = Gtk.Entry(hexpand=True,
+                               placeholder_text="Γράψε στον Bob…")
+        self.entry.connect("activate", lambda *_: self._send())
+        send = Gtk.Button(label="Αποστολή")
+        send.add_css_class("suggested-action")
+        send.connect("clicked", lambda *_: self._send())
+        row.append(self.entry)
+        row.append(send)
+        body.append(row)
+
+        self.spinner = Gtk.Spinner()
+        self.status = dim(Gtk.Label(label="", xalign=0), small=False)
+        foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        foot.append(self.spinner)
+        foot.append(self.status)
+        body.append(foot)
+        self.append(body)
+
+    def _working(self, on, message=""):
+        self.spinner.set_spinning(on)
+        self.status.set_label(message)
+
+    # ---- conversation
+    def reset(self):
+        self.chat.reset()
+        self.chat.system = chat_system()
+        while (c := self.thread_box.get_first_child()):
+            self.thread_box.remove(c)
+        self._working(False)
+
+    def _bubble(self, who, text):
+        lbl = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
+        lbl.add_css_class("chat-bubble")
+        lbl.add_css_class("chat-me" if who == "user" else "chat-bob")
+        lbl.set_halign(Gtk.Align.END if who == "user" else Gtk.Align.START)
+        self.thread_box.append(lbl)
+        GLib.idle_add(self._scroll_down)
+        return lbl
+
+    def _scroll_down(self):
+        adj = self.scroll.get_vadjustment()
+        adj.set_value(adj.get_upper() - adj.get_page_size())
+        return False
+
+    def _send(self):
+        text = self.entry.get_text().strip()
+        if not text or self.busy:
+            return
+        if not llm.available():
+            self.status.set_label(
+                "Το μοντέλο δεν έχει ληφθεί — Ρυθμίσεις → Διόρθωση AI")
+            return
+        if llm.ram_check()[0] == "block":
+            self.status.set_label(llm.ram_check()[1])
+            return
+        self.entry.set_text("")
+        self.busy = True
+        self._bubble("user", text)
+        reply = self._bubble("bob", "…")
+        self._working(True, "Ο Bob γράφει…" if llm.server_running()
+                      else "Φορτώνει το μοντέλο… (2,4 GB, μία φορά)")
+
+        def work():
+            if not llm.server_running() and not llm.start_server():
+                GLib.idle_add(self._done, reply, "")
+                return
+            acc = []
+
+            def token(piece):
+                acc.append(piece)
+                GLib.idle_add(reply.set_label, "".join(acc))
+                GLib.idle_add(self._scroll_down)
+            out = self.chat.send(text, on_token=token)
+            GLib.idle_add(self._done, reply, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, bubble, text):
+        self.busy = False
+        self._working(False)
+        bubble.set_label(text or "…δεν κατάφερα να απαντήσω, συγγνώμη.")
+        self._scroll_down()
+
+
 class SettingsPage(Gtk.Box):
     """Page: Ρυθμίσεις — grouped GNOME-style settings cards."""
 
@@ -1823,6 +1948,38 @@ class SettingsPage(Gtk.Box):
         sub_ai = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
         sub_ai.append(self.ai_status)
         ai.append(sub_ai)
+        bob = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      margin_top=12, margin_bottom=12,
+                      margin_start=14, margin_end=12)
+        self.sys_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                     left_margin=8, right_margin=8,
+                                     top_margin=6, bottom_margin=6)
+        self.sys_view.get_buffer().set_text(chat_system())
+        frame = Gtk.Box()
+        frame.add_css_class("voice-card")
+        frame.append(self.sys_view)
+        self.sys_view.set_size_request(-1, 110)
+        bob.append(dim(Gtk.Label(
+            label="Οδηγίες χαρακτήρα — τι είναι ο Bob και πώς απαντά",
+            xalign=0)))
+        bob.append(frame)
+        acts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                       halign=Gtk.Align.END)
+        default_btn = Gtk.Button(label="Προεπιλογή")
+        default_btn.connect("clicked", self._reset_system)
+        clear_btn = Gtk.Button(label="Καθαρισμός συνομιλίας")
+        clear_btn.connect("clicked", self._clear_chat)
+        save_btn = Gtk.Button(label="Αποθήκευση")
+        save_btn.add_css_class("suggested-action")
+        save_btn.connect("clicked", self._save_system)
+        for b in (default_btn, clear_btn, save_btn):
+            acts.append(b)
+        bob.append(acts)
+        self.bob_status = dim(Gtk.Label(label="", xalign=0))
+        bob.append(self.bob_status)
+        body.append(group("🤖  Bob (συνομιλία)",
+                          "Ο χαρακτήρας του και η μνήμη της κουβέντας", bob))
+
         body.append(group("🧠  Διόρθωση AI",
                           "Το βαρύ μοντέλο που διαβάζει ολόκληρη πρόταση", ai))
 
@@ -1894,6 +2051,7 @@ class SettingsPage(Gtk.Box):
         self.feature_toggles = {}
         feats = [("dictation", "🎤  Υπαγόρευση"), ("read", "📖  Ανάγνωση"),
                  ("meeting", "📝  Σύσκεψη"), ("notepad", "📝  Σημειωματάριο"),
+                 ("chat", "🤖  Bob"),
                  ("clipboard", "📋  Πρόχειρο")]
         for i, (key, label) in enumerate(feats):
             sw = Gtk.Switch(active=True)
@@ -2078,6 +2236,29 @@ class SettingsPage(Gtk.Box):
                 target=vk._download,
                 args=(stem + ".onnx.json", path + ".json",
                       lambda *_: None), daemon=True).start()).present()
+
+    # ---- Bob
+    def _system_text(self):
+        buf = self.sys_view.get_buffer()
+        return buf.get_text(*buf.get_bounds(), False).strip()
+
+    def _save_system(self, btn):
+        text = self._system_text()
+        save_chat_system(text)
+        page = self.win.pages.get("chat")
+        if page:                           # takes effect on the next message
+            page.chat.system = text or llm.DEFAULT_SYSTEM
+        self.bob_status.set_label("Αποθηκεύτηκε")
+
+    def _reset_system(self, btn):
+        self.sys_view.get_buffer().set_text(llm.DEFAULT_SYSTEM)
+        self._save_system(btn)
+
+    def _clear_chat(self, btn):
+        page = self.win.pages.get("chat")
+        if page:
+            page.reset()
+        self.bob_status.set_label("Η συνομιλία και η μνήμη καθαρίστηκαν")
 
     # ---- correction model
     def _llm_describe(self):
@@ -2599,6 +2780,7 @@ class MainWindow(Gtk.ApplicationWindow):
              ("read", "Ανάγνωση", "speaker"),
              ("meeting", "Σύσκεψη", "meeting"),
              ("notepad", "Σημειωματάριο", "notepad"),
+             ("chat", "Bob", "chat"),
              ("clipboard", "Πρόχειρο", "clip")]
 
     def __init__(self, app):
@@ -2663,6 +2845,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.pages = {}
         for key, cls in (("dictation", DictationPage), ("read", ReadPage),
                          ("meeting", MeetingPage), ("notepad", NotepadPage),
+                         ("chat", ChatPage),
                          ("clipboard", ClipboardPage),
                          ("settings", SettingsPage)):
             self.pages[key] = cls(self)
@@ -2744,14 +2927,29 @@ class MainWindow(Gtk.ApplicationWindow):
         self.nav_rows[key] = row
         return row
 
+    # pages that may hold the 2.4 GB model open
+    AI_PAGES = ("chat", "notepad")
+
     def _on_nav(self, listbox, row):
         if row is not None:
             self.stack.set_visible_child_name(row.page_key)
+            self._release_model(row.page_key)
+
+    def _release_model(self, page_key):
+        """Leaving Bob and the notepad frees the weights. Nobody expects a
+        chat tab they walked away from to keep 2.4 GB resident."""
+        if page_key in self.AI_PAGES:
+            return
+        chat = self.pages.get("chat")
+        if chat is not None and chat.busy:        # a reply is still streaming
+            return
+        threading.Thread(target=llm.stop_server, daemon=True).start()
 
     def show_page(self, key):
         if key in ("settings",):
             self.nav.unselect_all()
         self.stack.set_visible_child_name(key)
+        self._release_model(key)
 
     def set_feature(self, key, enabled):
         """Feature toggle: hide the page everywhere (design note_1)."""
@@ -2792,6 +2990,7 @@ class VoiceApp(Gtk.Application):
             self.tts.stop()
         except Exception:
             pass
+        llm.stop_server()                 # 2.4 GB must not outlive the app
         Gtk.Application.do_shutdown(self)
 
     def do_activate(self):
