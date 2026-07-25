@@ -326,17 +326,22 @@ def model_installed(key):
 
 
 def model_ram_check(key):
-    """(status, message) for using/installing model `key`.
+    """(status, message) for using/installing whisper model `key`."""
+    entry = WHISPER_MODELS.get(key)
+    if not entry:
+        return "block", "Άγνωστο μοντέλο."
+    _, dl_gb, need, label, _ = entry
+    return ram_check(label, need, dl_gb)
+
+
+def ram_check(label, need, dl_gb=0.0):
+    """(status, message) for running something that needs `need` GB.
 
     'ok'    — fits comfortably.
     'warn'  — needs more than half of what's free right now (many apps open).
     'block' — the machine can't run it: it wouldn't fit in free RAM, or barely
               fits in total RAM even with everything closed.
     """
-    entry = WHISPER_MODELS.get(key)
-    if not entry:
-        return "block", "Άγνωστο μοντέλο."
-    _, dl_gb, need, label, _ = entry
     total, avail = mem_gb()
     if total <= 0:
         return "ok", ""                      # can't measure — don't block

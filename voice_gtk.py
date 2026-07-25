@@ -37,6 +37,7 @@ from gi.repository import Gtk, Gdk, Gio, GLib, GObject, Pango
 # shared engines with the Tkinter app (no UI is created by importing these)
 import voice_keyboard as vk
 import predict
+import llm
 import read_aloud as ra
 import clipboard as clipmod
 import platform_io
@@ -69,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta9"
+VERSION = "0.0.6~beta10"
 
 
 _DARK = None
@@ -1401,12 +1402,17 @@ class NotepadPage(Gtk.Box):
         paste = Gtk.Button(label="Επικόλληση")
         paste.connect("clicked", self._on_paste)
         fix = Gtk.Button(label="Διόρθωση")
-        fix.add_css_class("suggested-action")
         fix.connect("clicked", self._on_correct)
+        self.ai_btn = Gtk.Button(label="Διόρθωση AI")
+        self.ai_btn.add_css_class("suggested-action")
+        self.ai_btn.set_tooltip_text(
+            "Διορθώνει και σύνταξη/νόημα με το τοπικό μοντέλο")
+        self.ai_btn.connect("clicked", self._on_correct_ai)
         copy = Gtk.Button(label="Αντιγραφή")
         copy.connect("clicked", self._on_copy)
         self.append(page_header("Σημειωματάριο", self.mic_btn,
-                                self.speak_btn, paste, fix, copy))
+                                self.speak_btn, paste, fix, self.ai_btn,
+                                copy))
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                        margin_top=14, margin_bottom=14,
@@ -1539,6 +1545,47 @@ class NotepadPage(Gtk.Box):
         self.get_clipboard().set(
             self.buf.get_text(*self.buf.get_bounds(), False))
 
+    def _on_correct_ai(self, btn):
+        """Context-aware pass. Runs off the main loop — 12 s a paragraph
+        would freeze the window, and the note must stay readable meanwhile."""
+        if not llm.available():
+            self.hint.set_label(
+                "Το μοντέλο AI δεν έχει ληφθεί — Ρυθμίσεις → Διόρθωση AI")
+            return
+        status, msg = llm.ram_check()
+        if status == "block":
+            InfoDialog(self.win, "Δεν υπάρχει αρκετή μνήμη", msg).present()
+            return
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        text = self.buf.get_text(start, end, False)
+        if not text.strip():
+            return
+        self.ai_btn.set_sensitive(False)
+        self.hint.set_label("Διόρθωση AI… (κρατάει λίγο)")
+
+        def work():
+            fixed = llm.correct(text, on_progress=lambda i, n: GLib.idle_add(
+                self.hint.set_label, f"Διόρθωση AI… {i}/{n}"))
+            GLib.idle_add(self._ai_done, text, fixed)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_done(self, original, fixed):
+        self.ai_btn.set_sensitive(True)
+        if not fixed or fixed == original:
+            self.hint.set_label("Καμία αλλαγή από το AI")
+            return
+        # re-resolve the range: the note may have been edited while it ran
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        if self.buf.get_text(start, end, False) != original:
+            self.hint.set_label("Το κείμενο άλλαξε — η διόρθωση ακυρώθηκε")
+            return
+        self.buf.delete(start, end)
+        self.buf.insert(start, fixed)
+        predictor().learn(fixed)
+        self.hint.set_label("Έγινε διόρθωση AI")
+
     # ---- voice, into and out of the note
     def _on_mic(self, btn):
         """Dictate straight into the note. Continuous with pause detection:
@@ -1648,6 +1695,19 @@ class SettingsPage(Gtk.Box):
                                 None, self.cont_toggle))
         dic.append(settings_row("Εμφάνιση πλαισίου κειμένου", None,
                                 Gtk.Switch(), divider=False))
+        ai = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.ai_status = dim(Gtk.Label(label="", xalign=0, wrap=True))
+        self.ai_get = Gtk.Button()
+        self.ai_get.connect("clicked", self._on_get_llm)
+        ai.append(settings_row(
+            "Μοντέλο διόρθωσης", "Τοπικό, offline — διορθώνει σύνταξη και "
+            "νόημα στο Σημειωματάριο", self.ai_get, divider=False))
+        sub_ai = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
+        sub_ai.append(self.ai_status)
+        ai.append(sub_ai)
+        body.append(group("🧠  Διόρθωση AI",
+                          "Το βαρύ μοντέλο που διαβάζει ολόκληρη πρόταση", ai))
+
         body.append(group("🎤  Υπαγόρευση",
                           "Πώς συμπεριφέρεται η υπαγόρευση φωνής", dic))
 
@@ -1786,6 +1846,7 @@ class SettingsPage(Gtk.Box):
         self.stt_drop.set_selected(self.stt_keys.index(self._stt_key))
         self._stt_describe()
         self.stt_drop.connect("notify::selected", self._stt_changed)
+        self._llm_describe()
         try:
             self.speed_scale.set_value(float(cfg.get("SPEED", "1.0")))
         except ValueError:
@@ -1881,6 +1942,35 @@ class SettingsPage(Gtk.Box):
                                 on_done=lambda: self._stt_accept(key)).present()
             return
         self._stt_accept(key)
+
+    # ---- correction model
+    def _llm_describe(self):
+        _, dl_gb, need, label, note, _ = llm.LLM_MODELS[llm.DEFAULT_MODEL]
+        have = llm.installed()
+        self.ai_get.set_label("Ληφθέν ✓" if have else "Λήψη…")
+        self.ai_get.set_sensitive(not have)
+        status, msg = llm.ram_check()
+        if not llm.binary():
+            self.ai_status.set_label(
+                "Δεν βρέθηκε το llama.cpp σε αυτή την εγκατάσταση.")
+        elif msg:
+            self.ai_status.set_label(
+                ("⚠  " if status == "warn" else "⛔  ") + msg)
+        else:
+            self.ai_status.set_label(
+                f"{label} · {note} · λήψη {dl_gb:.1f} GB · ~{need:.1f} GB RAM"
+                + ("" if have else " (δεν έχει ληφθεί)"))
+
+    def _on_get_llm(self, btn):
+        key = llm.DEFAULT_MODEL
+        _, dl_gb, need, label, note, url = llm.LLM_MODELS[key]
+        status, msg = llm.ram_check()
+        if status == "block":
+            InfoDialog(self.win, "Δεν υπάρχει αρκετή μνήμη", msg).present()
+            return
+        ModelDownloadDialog(self.win, key, msg, on_done=self._llm_describe,
+                            url=url, dest=llm.model_path(key),
+                            spec=(dl_gb, need, label, note)).present()
 
     def _set_shortcut(self, key, combo):
         self.sc_chips[key].set_label(combo or "—")
@@ -2022,10 +2112,13 @@ class ModelDownloadDialog(VoiceDialog):
     The worker thread never touches widgets — it hands progress to the GTK
     main loop via GLib.idle_add (same rule as the Tkinter first-run dialog)."""
 
-    def __init__(self, parent, key, warning, on_done=None):
-        fname, dl_gb, need, label, note = vk.WHISPER_MODELS[key]
+    def __init__(self, parent, key, warning, on_done=None, url=None,
+                 dest=None, spec=None):
+        dl_gb, need, label, note = spec or vk.WHISPER_MODELS[key][1:]
         super().__init__(parent, "Λήψη μοντέλου", 470)
-        self.key, self.fname, self.on_done = key, fname, on_done
+        self.key, self.on_done = key, on_done
+        self.url = url or f"{vk.HF_WHISPER}/{vk.WHISPER_MODELS[key][0]}"
+        self.dest = dest or vk.model_path(key)
 
         self.box.append(dim(Gtk.Label(
             label=f"{label} — {note}\nΛήψη ~{dl_gb:.1f} GB · χρειάζεται "
@@ -2057,9 +2150,9 @@ class ModelDownloadDialog(VoiceDialog):
         threading.Thread(target=self._work, daemon=True).start()
 
     def _work(self):
-        dest = vk.model_path(self.key)
+        dest = self.dest
         try:
-            vk._download(f"{vk.HF_WHISPER}/{self.fname}", dest,
+            vk._download(self.url, dest,
                          lambda done, total: GLib.idle_add(
                              self._progress, done, total))
         except Exception as e:                      # network / disk / timeout

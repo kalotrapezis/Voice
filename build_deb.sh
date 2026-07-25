@@ -39,6 +39,7 @@ install -m644 "$PROJ/read_aloud.py"     "$APP/"
 install -m644 "$PROJ/platform_io.py"    "$APP/"
 install -m644 "$PROJ/clipboard.py"      "$APP/"
 install -m644 "$PROJ/predict.py"        "$APP/"
+install -m644 "$PROJ/llm.py"            "$APP/"
 install -Dm644 "$PROJ/Assets/VoiceIcon.png" "$APP/Assets/VoiceIcon.png"
 # icon set used by the GTK 4 UI
 install -d "$APP/Assets/SVGs"
@@ -51,6 +52,22 @@ cp -a "$PROJ/piper_tts" "$APP/"
 install -m755 "$PROJ/whisper.cpp/build/bin/whisper-cli" "$APP/whisper.cpp/build/bin/"
 cp -aP "$PROJ"/whisper.cpp/build/src/libwhisper.so*    "$APP/whisper.cpp/build/src/"
 cp -aP "$PROJ"/whisper.cpp/build/ggml/src/libggml*.so* "$APP/whisper.cpp/build/ggml/src/"
+
+# llama-completion + its libs, when built (optional: the AI correction is the
+# only thing that needs it, and the model is fetched on demand anyway)
+if [ -x "$PROJ/llama.cpp/build/bin/llama-completion" ]; then
+  install -d "$APP/llama.cpp/build/bin"
+  install -m755 "$PROJ/llama.cpp/build/bin/llama-completion" \
+    "$APP/llama.cpp/build/bin/"
+  cp -aP "$PROJ"/llama.cpp/build/bin/*.so* "$APP/llama.cpp/build/bin/"
+  if command -v patchelf >/dev/null 2>&1; then
+    patchelf --set-rpath '$ORIGIN' "$APP/llama.cpp/build/bin/llama-completion" \
+      || true
+  fi
+  echo "  · llama-completion bundled ($(du -sh "$APP/llama.cpp" | cut -f1))"
+else
+  echo "  · llama.cpp not built — AI correction will be unavailable"
+fi
 
 # make the bundled whisper relocatable if patchelf is available (the launcher
 # sets LD_LIBRARY_PATH too, so this is belt-and-suspenders)
