@@ -85,6 +85,24 @@ def main():
     p._on_changed()
     assert p.suggestions[0] == "ανοίξω", p.suggestions
 
+    # the AI continuation sits among the chips and is inserted verbatim,
+    # while a dictionary chip replaces the half-typed word
+    p.buf.set_text("θέλει δουλειά πολ")
+    p._on_changed()
+    p.ai_text = "λή"
+    p.picked = len(p.suggestions)                      # the ✨ chip
+    labels = [lbl for lbl, _ in p._chip_items()]
+    assert labels[-1].startswith("✨"), labels
+    assert p._on_key(None, Gdk.KEY_Return, 0, 0) is True
+    assert p.buf.get_text(*p.buf.get_bounds(), False) == "θέλει δουλειά πολλή"
+    assert p.ai_text == "" and p.suggestions == []
+
+    # with nothing typed, the chips become next-word guesses from pairs
+    g.predictor().learn("θέλει δουλειά πολλή. θέλει δουλειά ακόμα.")
+    p.buf.set_text("θέλει ")
+    p._on_changed()
+    assert p.suggestions and p.suggestions[0] == "δουλειά", p.suggestions
+
     # counts, with the selection in parentheses
     p.buf.set_text("ένα δύο τρία")
     p._update_counts()

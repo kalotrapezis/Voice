@@ -30,9 +30,12 @@ HUNSPELL_ENC = "iso-8859-7"
 MIN_LEN = 3                 # όλα, όχι, μια — Greek leans on short words
 SUGGEST_MIN = 4             # but completing a 3-letter word saves nobody time
 MAX_LEN = 24
-WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+# one letter counts: "ο" and "η" are words, and they are exactly the context
+# that tells άνοιξη from άνοιξε
+WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 ALPHABET = "αβγδεζηθικλμνξοπρστυφχψως"          # unaccented: keys are stripped
-DICT_SCAN = 600             # candidates read before ranking by frequency
+DICT_SCAN = 400             # rare-word fallback: index rows read per lookup
+FREQ_CANDIDATES = 12        # matches pulled off the frequency list per lookup
 
 
 def _data_dir():
@@ -58,6 +61,12 @@ def load_frequencies():
         except OSError:
             continue
     return {}
+
+
+def load_frequencies_ordered():
+    """Words from the bundled list, most used first."""
+    freq = load_frequencies()
+    return sorted(freq, key=freq.get, reverse=True)
 
 
 def build_index(path):
@@ -129,6 +138,7 @@ class Predictor:
         self.counts = {}                  # key -> {surface form: count}
         self.pairs = {}                   # "prev next" key -> count
         self._mm = None                   # mmap of the sorted index
+        self._rank_list = None            # frequency list, most used first
         self._loaded = False
         if learned_path and os.path.exists(learned_path):
             try:
@@ -194,6 +204,18 @@ class Predictor:
             pos = end + 1
         return out
 
+    def _ranked(self):
+        """The frequency list as [(key, word)], most used first.
+
+        Walking the dictionary alphabetically could not work: "πολ" matches
+        5592 keys and "πολύ" — the 42nd most common Greek word — sits behind
+        every πόλεμ-/πολιτ- form. Walking 50k words in frequency order finds
+        it in the first handful and stops."""
+        if self._rank_list is None:
+            self._rank_list = [(_key(w), w)
+                               for w in load_frequencies_ordered()]
+        return self._rank_list
+
     # ---- learning
     def learn(self, text):
         """Count the words — and the word pairs — of something written here.
@@ -237,6 +259,12 @@ class Predictor:
         def pair_count(word):
             return self.pairs.get(f"{pkey} {_key(word)}", 0) if pkey else 0
 
+        # The word may already be typed in full, just without its accent —
+        # which is how most people type Greek. Offer the accented spelling as
+        # the first completion instead of going silent and leaving the whole
+        # note for the AI pass to fix.
+        accented = [w for w in self._lookup(key) if w != prefix][:1]
+
         # own vocabulary first, most-used first, pairs ahead of bare counts
         hits = []
         for k, forms in self.counts.items():
@@ -244,22 +272,52 @@ class Predictor:
                 form, count = max(forms.items(), key=lambda kv: kv[1])
                 hits.append((-pair_count(form), -count, len(form), form))
         hits.sort()
-        out = [h[-1] for h in hits[:n]]
+        out = accented + [h[-1] for h in hits[:n] if h[-1] not in accented]
+        out = out[:n]
 
-        if len(out) < n:
-            # Rank the dictionary by how often Greeks actually use the word,
-            # not alphabetically: "ανοιξ" used to offer ανοίξαμε before
-            # άνοιξη. Scan a wide slice, then keep the most common.
-            seen = {_key(w) for w in out}
+        seen = {_key(w) for w in out}
+        if len(out) < n:                   # the common words, by frequency
             pool = []
+            for i, (k, word) in enumerate(self._ranked()):
+                if not k.startswith(key) or k == key or k in seen:
+                    continue
+                seen.add(k)
+                pool.append((-pair_count(word), i, word))
+                if len(pool) >= FREQ_CANDIDATES:
+                    break
+            pool.sort()
+            out += [p[-1] for p in pool[:n - len(out)]]
+
+        if len(out) < n:                   # rare words the list never saw
             for k, forms in self._dict_matches(key, DICT_SCAN):
                 if k == key or k in seen:
                     continue
                 seen.add(k)
-                word, count = forms[0]
-                pool.append((-pair_count(word), -count, len(word), word))
-            pool.sort()
-            out += [p[-1] for p in pool[:n - len(out)]]
+                out.append(forms[0][0])
+                if len(out) == n:
+                    break
+        return out
+
+    def next_words(self, prev, n=3):
+        """What usually follows `prev` here — the next word, not a completion.
+
+        Only from pairs seen in this user's own writing: a general frequency
+        list would just propose "να", "το", "δεν" after everything."""
+        if not prev:
+            return []
+        head = _key(prev) + " "
+        hits = [(-c, k[len(head):]) for k, c in self.pairs.items()
+                if k.startswith(head)]
+        hits.sort()
+        out = []
+        for _, key in hits:
+            forms = self.counts.get(key) or {}
+            word = (max(forms.items(), key=lambda kv: kv[1])[0] if forms
+                    else (self._lookup(key) or [key])[0])
+            if word not in out:
+                out.append(word)
+            if len(out) == n:
+                break
         return out
 
     # ---- spelling
@@ -369,6 +427,11 @@ def demo():
     # accents are ignored while matching but kept in what gets inserted
     assert "μίλησα" in p.suggest("μιλ")
 
+    # a fully typed word with no accent gets its accent offered
+    if os.path.exists(HUNSPELL):
+        assert Predictor().suggest("δουλεια", 3)[0] == "δουλειά"
+        assert "δουλειά" not in Predictor().suggest("δουλειά", 3)  # already right
+
     # a word pair seen here beats the subtitle frequencies: "άνοιξε" is four
     # times more common than "άνοιξη", but not after "η"
     ctx = Predictor()
@@ -379,6 +442,13 @@ def demo():
         ctx.suggest("ανοιξ", 3, prev="η")
     assert ctx.suggest("ανοιξ", 3, prev="να")[0] == "ανοίξω", \
         ctx.suggest("ανοιξ", 3, prev="να")
+
+    # next-word prediction comes from pairs, and stays quiet without them
+    nxt = Predictor()
+    assert nxt.next_words("η") == []
+    nxt.learn("η άνοιξη είναι εδώ. η άνοιξη ήρθε. η θάλασσα λάμπει.")
+    assert nxt.next_words("η")[0] == "άνοιξη", nxt.next_words("η")
+    assert nxt.next_words("ανύπαρκτη") == []
 
     # the system dictionary fills in when nothing has been learned yet
     fresh = Predictor()

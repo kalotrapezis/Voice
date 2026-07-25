@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta12"
+VERSION = "0.0.6~beta14"
 
 
 _DARK = None
@@ -1395,6 +1395,7 @@ class NotepadPage(Gtk.Box):
         self.win = win
         self.suggestions = []
         self.picked = -1                   # which chip Tab has walked to
+        self.ai_text = ""                  # the model's continuation, if asked
         self.overlay_pos = (0, 0)
 
         self.rec = Recorder()
@@ -1482,21 +1483,34 @@ class NotepadPage(Gtk.Box):
         self._update_counts()
         prefix, start, _ = self._word_before_cursor()
         self.suggestions = (predictor().suggest(prefix, prev=self._prev_word(start))
-                            if prefix else [])
+                            if prefix else
+                            predictor().next_words(self._prev_word(start)))
+        self.ai_text = ""                  # a keystroke invalidates the guess
         self.picked = -1                   # a fresh word highlights nothing
         self._show_chips()
+
+    def _chip_items(self):
+        """[(label, action)] — dictionary words, then the AI continuation."""
+        items = [(w, lambda w=w: self._accept(w)) for w in self.suggestions]
+        if self.ai_text:
+            shown = self.ai_text.strip()
+            if len(shown) > 46:            # a whole phrase, trimmed to fit
+                shown = shown[:45].rsplit(" ", 1)[0] + "…"
+            items.append(("✨ " + shown,
+                          lambda: self._accept_raw(self.ai_text)))
+        return items
 
     def _show_chips(self):
         while (c := self.chips.get_first_child()):
             self.chips.remove(c)
-        if not self.suggestions:
+        if not self.suggestions and not self.ai_text:
             self.chips.set_visible(False)
             return
-        for i, word in enumerate(self.suggestions):
-            b = Gtk.Button(label=word)
+        for i, (label, action) in enumerate(self._chip_items()):
+            b = Gtk.Button(label=label)
             b.add_css_class("suggested-action" if i == self.picked
                             else "kbd-chip")
-            b.connect("clicked", lambda _b, w=word: self._accept(w))
+            b.connect("clicked", lambda _b, a=action: a())
             self.chips.append(b)
         self._point_at_caret()
         self.chips.set_visible(True)
@@ -1527,7 +1541,11 @@ class NotepadPage(Gtk.Box):
 
         Nothing is inserted until Enter, so Tab is safe to lean on: you can
         look at all three and still end up typing your own word."""
-        if not self.suggestions:
+        if keyval == Gdk.KEY_space and (state & Gdk.ModifierType.CONTROL_MASK):
+            self._ask_ai()
+            return True
+        items = self._chip_items()
+        if not items:
             return False
         if keyval == Gdk.KEY_Escape:
             self._dismiss()
@@ -1535,19 +1553,63 @@ class NotepadPage(Gtk.Box):
         if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab):
             step = -1 if keyval == Gdk.KEY_ISO_Left_Tab else 1
             if self.picked < 0:            # -1 + -1 would land on the middle
-                self.picked = 0 if step > 0 else len(self.suggestions) - 1
+                self.picked = 0 if step > 0 else len(items) - 1
             else:
-                self.picked = (self.picked + step) % len(self.suggestions)
+                self.picked = (self.picked + step) % len(items)
             self._show_chips()
             return True                    # never a literal tab in the note
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.picked >= 0:
-            self._accept(self.suggestions[self.picked])
+            items[self.picked][1]()
             return True                    # and no newline either
         return False
 
     def _dismiss(self):
         self.suggestions = []
+        self.ai_text = ""
         self.picked = -1
+        self._show_chips()
+
+    def _accept_raw(self, text):
+        """Insert the AI's continuation verbatim — it is the next words, not
+        a replacement for the one being typed."""
+        self.buf.insert_at_cursor(text)
+        self._dismiss()
+        self.view.grab_focus()
+
+    def _ask_ai(self):
+        """Ctrl+Space: what would the model write next, given the note."""
+        if not llm.available():
+            self.hint.set_label(
+                "Το μοντέλο AI δεν έχει ληφθεί — Ρυθμίσεις → Διόρθωση AI")
+            return
+        if llm.ram_check()[0] == "block":
+            self.hint.set_label(llm.ram_check()[1])
+            return
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        context = self.buf.get_text(self.buf.get_start_iter(), end, False)
+        if not context.strip():
+            return
+        self.hint.set_label("AI γράφει τη συνέχεια…" if llm.server_running()
+                            else "Ξεκινάει το AI… (μία φορά)")
+
+        def work():
+            if not llm.server_running() and not llm.start_server():
+                GLib.idle_add(self.hint.set_label, "Το AI δεν ξεκίνησε")
+                return
+            GLib.idle_add(self._ai_suggested, context,
+                          llm.next_words(context))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_suggested(self, context, text):
+        self.hint.set_label("")
+        if not text:
+            return
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        now = self.buf.get_text(self.buf.get_start_iter(), end, False)
+        if now != context:                 # kept typing: the guess is stale
+            return
+        self.ai_text = text
+        self.picked = len(self.suggestions)
         self._show_chips()
 
     # ---- counts

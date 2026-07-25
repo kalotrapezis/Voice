@@ -60,10 +60,15 @@ if [ -x "$PROJ/llama.cpp/build/bin/llama-completion" ]; then
   install -d "$APP/llama.cpp/build/bin"
   install -m755 "$PROJ/llama.cpp/build/bin/llama-completion" \
     "$APP/llama.cpp/build/bin/"
+  [ -x "$PROJ/llama.cpp/build/bin/llama-server" ] && \
+    install -m755 "$PROJ/llama.cpp/build/bin/llama-server" \
+      "$APP/llama.cpp/build/bin/"
   cp -aP "$PROJ"/llama.cpp/build/bin/*.so* "$APP/llama.cpp/build/bin/"
   if command -v patchelf >/dev/null 2>&1; then
-    patchelf --set-rpath '$ORIGIN' "$APP/llama.cpp/build/bin/llama-completion" \
-      || true
+    for b in llama-completion llama-server; do
+      [ -x "$APP/llama.cpp/build/bin/$b" ] && \
+        patchelf --set-rpath '$ORIGIN' "$APP/llama.cpp/build/bin/$b" || true
+    done
   fi
   echo "  · llama-completion bundled ($(du -sh "$APP/llama.cpp" | cut -f1))"
 else
