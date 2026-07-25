@@ -21,6 +21,7 @@ from read_aloud import voice_data_dir
 
 STORE = os.path.join(voice_data_dir(), "chats.json")
 MAX_NOTES = 25              # notes kept before they are folded into one line
+MAX_FACTS = 20              # personal details carried into new conversations
 NOTE_WORDS = 2
 TITLE_CHARS = 40
 
@@ -36,6 +37,7 @@ class Store:
         self.path = path
         self.chats = []                   # newest first
         self.notes = []                   # ["δύο λέξεις", ...]
+        self.facts = []                   # ["Τον λένε Τέο", ...]
         self.summary = ""
         self.load()
 
@@ -48,6 +50,7 @@ class Store:
             return
         self.chats = data.get("chats", [])
         self.notes = data.get("notes", [])
+        self.facts = data.get("facts", [])
         self.summary = data.get("summary", "")
 
     def save(self):
@@ -55,7 +58,8 @@ class Store:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"chats": self.chats, "notes": self.notes,
-                       "summary": self.summary}, f, ensure_ascii=False)
+                       "facts": self.facts, "summary": self.summary},
+                      f, ensure_ascii=False)
         os.replace(tmp, self.path)
 
     # ---- chats
@@ -107,9 +111,39 @@ class Store:
             return ""
         chat["note"] = note
         self.notes.append(note)
+        self.learn_facts(said)
         if len(self.notes) > MAX_NOTES:
             self.fold()
         return note
+
+    def learn_facts(self, said):
+        """Personal details the user let slip, one per line.
+
+        Two words about the topic are not enough to make later conversations
+        personal — the assistant persona promises to remember that you are
+        called Teo and write Greek software, so something has to actually
+        hold that."""
+        out = llm._ask(
+            "Γράψε ΜΟΝΟ τα προσωπικά στοιχεία που ανέφερε ο ΧΡΗΣΤΗΣ για τον "
+            "εαυτό του. Ένα ανά γραμμή, στη μορφή «χαρακτηριστικό: τιμή» "
+            "(π.χ. «όνομα: Τέο», «δουλειά: προγραμματιστής»). Αν δεν "
+            f"ανέφερε κανένα, γράψε ΚΑΝΕΝΑ.\n\n{said}",
+            n_predict=120, temperature=0)
+        added = []
+        known = {f.lower() for f in self.facts}
+        # ΚΑΝΕΝΑ arrives as a trailing line *beside* real facts, so it is
+        # dropped per line — testing it against the whole answer threw the
+        # good lines away with it
+        for line in (out or "").splitlines():
+            fact = line.strip(" -*·•\t")[:120]
+            if len(fact) < 3 or "ΚΑΝΕΝΑ" in fact.upper() \
+                    or fact.lower() in known:
+                continue
+            known.add(fact.lower())
+            self.facts.append(fact)
+            added.append(fact)
+        del self.facts[:-MAX_FACTS]        # keep the most recent ones
+        return added
 
     def fold(self):
         """All the notes become one sentence — memory has to stay bounded."""
@@ -124,10 +158,18 @@ class Store:
     def memory_text(self):
         """What a new conversation is told about the old ones."""
         parts = ([self.summary] if self.summary else []) + self.notes[-12:]
-        return " · ".join(p for p in parts if p)
+        topics = " · ".join(p for p in parts if p)
+        facts = "· ".join(self.facts[-MAX_FACTS:])
+        out = []
+        if facts:
+            out.append(f"Ο χρήστης: {facts}")
+        if topics:
+            out.append(f"Θέματα: {topics}")
+        return " | ".join(out)
 
     def forget(self):
         self.notes = []
+        self.facts = []
         self.summary = ""
         for chat in self.chats:
             chat["note"] = ""
@@ -158,8 +200,16 @@ def demo():
         assert again.notes == [] and again.summary
     assert len(again.memory_text()) < 700
 
+    # personal details are kept, deduped and bounded
+    again.facts = ["Τον λένε Τέο"]
+    again.facts += [f"στοιχείο {i}" for i in range(MAX_FACTS + 5)]
+    del again.facts[:-MAX_FACTS]
+    assert len(again.facts) == MAX_FACTS
+    again.facts = ["Τον λένε Τέο", "Γράφει ελληνικό λογισμικό"]
+    assert "Ο χρήστης: Τον λένε Τέο" in again.memory_text()
+
     again.forget()
-    assert again.notes == [] and again.summary == ""
+    assert again.notes == [] and again.summary == "" and again.facts == []
     assert again.memory_text() == ""
 
     # a chat with no turns is never summarised (nothing to say about it)

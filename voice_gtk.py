@@ -71,7 +71,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.7~beta3"
+VERSION = "0.0.7~beta5"
 
 
 _DARK = None
@@ -2166,7 +2166,11 @@ class SettingsPage(Gtk.Box):
             label="Οδηγίες χαρακτήρα — ποιος είναι και πώς απαντά",
             xalign=0)))
         bob.append(frame)
-        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # a flow box, not a row: five characters do not fit on one line at
+        # every window width
+        chips = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,
+                            column_spacing=6, row_spacing=6,
+                            max_children_per_line=4)
         for name, label, prompt in llm.PERSONAS:
             chip = Gtk.Button(label=label)
             chip.add_css_class("kbd-chip")
@@ -2643,6 +2647,11 @@ class MemoryDialog(VoiceDialog):
         self.page = page
         store = page.store
 
+        if store.facts:
+            facts = Gtk.Label(label="👤 " + " · ".join(store.facts[-20:]),
+                              xalign=0, wrap=True)
+            facts.add_css_class("chat-memory")
+            self.box.append(facts)
         if store.summary:
             lbl = Gtk.Label(label="🧠 " + store.summary, xalign=0, wrap=True)
             lbl.add_css_class("chat-memory")
@@ -2655,10 +2664,11 @@ class MemoryDialog(VoiceDialog):
                 n.add_css_class("chat-note")
                 wrap.append(n)
             self.box.append(wrap)
-        if not store.summary and not notes:
+        if not store.summary and not notes and not store.facts:
             self.box.append(dim(Gtk.Label(
-                label="Άδεια — γράψε με τον Bob και θα κρατήσει δύο λέξεις "
-                      "από κάθε κουβέντα.", xalign=0, wrap=True), small=False))
+                label="Άδεια — κουβέντιασε και θα κρατήσει δύο λέξεις από "
+                      "κάθε συζήτηση, μαζί με όσα στοιχεία πεις για σένα.",
+                xalign=0, wrap=True), small=False))
 
         forget = Gtk.Button(label="Διαγραφή μνήμης")
         forget.add_css_class("destructive-action")
