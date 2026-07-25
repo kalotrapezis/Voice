@@ -7,9 +7,11 @@
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
-# upstream version 0.0.5, packaging revision "b" (desktop-disruption, duplicate
-# text, mini-bar and theme-icon fixes)
-VERSION="${VERSION:-0.0.5-b}"
+# One version, one place: voice_gtk.py's VERSION is what the sidebar and the
+# About dialog show, so the package takes it from there too. Three hand-kept
+# copies had already drifted into three different numbers on the same install.
+VERSION="${VERSION:-$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$PROJ/voice_gtk.py")}"
+[ -n "$VERSION" ] || { echo "✗ no VERSION in voice_gtk.py"; exit 1; }
 ARCH="${ARCH:-amd64}"
 PKG="voice_${VERSION}_${ARCH}"
 OUT="$PROJ/build/deb"

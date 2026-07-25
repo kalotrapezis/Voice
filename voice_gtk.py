@@ -69,7 +69,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.5"
+VERSION = "0.0.6~beta7"
 
 
 _DARK = None
@@ -1361,6 +1361,16 @@ class NotepadPage(Gtk.Box):
         self.suggestions = []
         self.space_completes = False
 
+        self.rec = Recorder()
+        self.transcriber = Transcriber()
+
+        self.mic_btn = svg_button("mic-on-white", 18,
+                                  ("destructive-action", "mini-round"))
+        self.mic_btn.set_tooltip_text("Υπαγόρευση μέσα στο σημείωμα")
+        self.mic_btn.connect("clicked", self._on_mic)
+        self.speak_btn = svg_button(icon_for("speaker"), 18, ("mini-round",))
+        self.speak_btn.set_tooltip_text("Ανάγνωση επιλογής ή όλου")
+        self.speak_btn.connect("clicked", self._on_speak)
         paste = Gtk.Button(label="Επικόλληση")
         paste.connect("clicked", self._on_paste)
         fix = Gtk.Button(label="Διόρθωση")
@@ -1368,7 +1378,8 @@ class NotepadPage(Gtk.Box):
         fix.connect("clicked", self._on_correct)
         copy = Gtk.Button(label="Αντιγραφή")
         copy.connect("clicked", self._on_copy)
-        self.append(page_header("Σημειωματάριο", paste, fix, copy))
+        self.append(page_header("Σημειωματάριο", self.mic_btn,
+                                self.speak_btn, paste, fix, copy))
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                        margin_top=14, margin_bottom=14,
@@ -1389,14 +1400,25 @@ class NotepadPage(Gtk.Box):
         frame.append(scrolled(self.view))
         body.append(frame)
 
-        self.chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.hint = dim(Gtk.Label(label="", xalign=0), small=False)
-        self.chips.append(self.hint)
-        body.append(self.chips)
+        # suggestions ride under the caret, not at the bottom of the page.
+        # autohide=False is the load-bearing bit: an autohiding popover grabs
+        # focus, and the editor you are typing in would stop receiving keys.
+        self.chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                             margin_top=4, margin_bottom=4,
+                             margin_start=6, margin_end=6)
+        self.pop = Gtk.Popover(autohide=False, has_arrow=False,
+                               position=Gtk.PositionType.BOTTOM)
+        self.pop.set_parent(self.view)
+        self.pop.set_child(self.chips)
 
-        self.counts = dim(Gtk.Label(
-            label="λέξεις 0 · χαρακτήρες 0", xalign=0), small=False)
-        body.append(self.counts)
+        self.hint = dim(Gtk.Label(label="", xalign=0, hexpand=True),
+                        small=False)
+        self.counts = dim(Gtk.Label(label="λέξεις 0 · χαρακτήρες 0"),
+                          small=False)
+        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        status.append(self.hint)
+        status.append(self.counts)
+        body.append(status)
         self.append(body)
 
     # ---- prediction
@@ -1424,17 +1446,25 @@ class NotepadPage(Gtk.Box):
         while (c := self.chips.get_first_child()):
             self.chips.remove(c)
         if not self.suggestions:
-            self.chips.append(self.hint)
-            self.hint.set_label("")
+            self.pop.popdown()
             return
         for i, word in enumerate(self.suggestions):
             b = Gtk.Button(label=word)
-            b.add_css_class("kbd-chip" if i else "suggested-action")
+            b.add_css_class("suggested-action" if i == 0 and
+                            self.space_completes else "kbd-chip")
             b.connect("clicked", lambda _b, w=word: self._accept(w))
             self.chips.append(b)
-        self.chips.append(dim(Gtk.Label(
-            label=("  Κενό → πρώτη πρόταση · Esc για ακύρωση"
-                   if self.space_completes else "  Κλικ για συμπλήρωση"))))
+        self._point_at_caret()
+        self.pop.popup()
+
+    def _point_at_caret(self):
+        """Park the popover on the caret's own rectangle inside the view."""
+        it = self.buf.get_iter_at_mark(self.buf.get_insert())
+        r = self.view.get_iter_location(it)
+        x, y = self.view.buffer_to_window_coords(
+            Gtk.TextWindowType.WIDGET, r.x, r.y)
+        self.pop.set_pointing_to(Gdk.Rectangle(
+            x=x, y=y, width=max(r.width, 1), height=max(r.height, 1)))
 
     def _accept(self, word):
         prefix, start, end = self._word_before_cursor()
@@ -1485,6 +1515,46 @@ class NotepadPage(Gtk.Box):
     def _on_copy(self, btn):
         self.get_clipboard().set(
             self.buf.get_text(*self.buf.get_bounds(), False))
+
+    # ---- voice, into and out of the note
+    def _on_mic(self, btn):
+        """Dictate straight into the note. Continuous with pause detection:
+        in an editor you talk in phrases, and each one lands at the cursor."""
+        if self.rec.running:
+            self.rec.stop()
+            self.transcriber.cancel()      # or phrases keep landing after stop
+            self.mic_btn.set_child(svg_icon("mic-on-white", 18))
+            self.hint.set_label("")
+            return
+        dev = self.win.settings().mic_device()
+        self.rec.start(dev, on_segment=self._on_segment, vad=True)
+        self.mic_btn.set_child(svg_icon("stop-white", 16))
+        self.hint.set_label("Ακούω… μίλα και γράφεται στον κέρσορα")
+
+    def _on_segment(self, pcm):
+        self.transcriber.submit(pcm, self.win.settings().dict_lang(),
+                                self._dictated)
+
+    def _dictated(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        self.buf.insert_at_cursor(text + " ")
+        predictor().learn(text)
+
+    def _on_speak(self, btn):
+        tts = self.win.app.tts
+        if tts.speaking:                   # the button doubles as stop
+            tts.stop()
+            return
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        text = self.buf.get_text(start, end, False).strip()
+        if not text:
+            self.hint.set_label("Δεν υπάρχει κείμενο για ανάγνωση")
+            return
+        st = self.win.settings()
+        tts.speak(text, st.voice_model(), st.speed())
 
     def _on_correct(self, btn):
         """Fix the selection, or the whole note when nothing is selected."""
@@ -2062,7 +2132,9 @@ def show_about(parent):
     about = Gtk.AboutDialog(
         transient_for=parent, modal=True,
         program_name="VOICE",
-        version=f"v{VERSION} · Φωνή, τοπικά & offline",
+        # no bare "&" here: AboutDialog parses this as Pango markup, and a
+        # markup error makes GTK silently fall back to "version 1.0"
+        version=f"v{VERSION} · Φωνή, τοπικά, offline",
         comments="Ελληνική υπαγόρευση, ανάγνωση, μεταγραφή συσκέψεων και "
                  "πρόχειρο — όλα στη συσκευή σου.",
         website="https://github.com/kalotrapezis",

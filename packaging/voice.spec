@@ -7,7 +7,8 @@
 %global __requires_exclude ^(libwhisper|libggml.*|libpiper_phonemize|libonnxruntime|libespeak-ng)\\.so.*$
 
 Name:           voice
-Version:        0.0.5
+# kept in step with voice_gtk.py VERSION by build_rpm.sh
+Version:        0.0.6~beta7
 Release:        1%{?dist}
 Summary:        Greek voice keyboard & read-aloud (offline STT/TTS) for Linux (KDE/Cinnamon)
 
