@@ -22,9 +22,11 @@ import unicodedata
 
 HUNSPELL = "/usr/share/hunspell/el_GR.dic"
 HUNSPELL_ENC = "iso-8859-7"
-MIN_LEN = 4                 # shorter words are faster to type than to pick
+MIN_LEN = 3                 # όλα, όχι, μια — Greek leans on short words
+SUGGEST_MIN = 4             # but completing a 3-letter word saves nobody time
 MAX_LEN = 24
 WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+ALPHABET = "αβγδεζηθικλμνξοπρστυφχψως"          # unaccented: keys are stripped
 
 
 def _data_dir():
@@ -32,23 +34,27 @@ def _data_dir():
     return os.path.join(base, "voice")
 
 
-DEFAULT_INDEX = os.path.join(_data_dir(), "el_words.idx")
+DEFAULT_INDEX = os.path.join(_data_dir(), "el_words.v2.idx")
 
 
 def build_index(path):
-    """One-off: hunspell's ISO-8859-7 word list -> sorted 'key\tform' lines."""
-    rows = []
+    """One-off: hunspell's ISO-8859-7 word list -> sorted 'key\tform|form' lines.
+
+    All accent variants of a key are kept. Greek has real pairs that differ
+    only in stress (καλημέρα/καλήμερα, πότε/ποτέ); keeping one at random meant
+    "correcting" a correctly written word into its rarer twin."""
+    forms = {}
     with open(HUNSPELL, encoding=HUNSPELL_ENC, errors="ignore") as f:
         next(f, None)                      # first line is the word count
-        seen = set()
         for line in f:
             w = line.split("/", 1)[0].strip()
             if not (MIN_LEN <= len(w) <= MAX_LEN) or not w[:1].islower():
                 continue
-            k = _key(w)
-            if k not in seen:
-                seen.add(k)
-                rows.append(k + "\t" + w)
+            variants = forms.setdefault(_key(w), [])
+            if w not in variants and len(variants) < 4:
+                variants.append(w)
+    rows = [k + "\t" + "|".join(sorted(v, key=_variant_rank))
+            for k, v in forms.items()]
     rows.sort()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".part"
@@ -56,6 +62,19 @@ def build_index(path):
         f.write("\n".join(rows) + "\n")
     os.replace(tmp, path)
     return len(rows)
+
+
+def _variant_rank(w):
+    """Order accent variants of the same key, most likely first.
+
+    Two rules, both cheap and both earned from real output: fewer accent marks
+    wins (the dictionary lists enclitic forms like "υπαγόρευσή" beside plain
+    "υπαγόρευση"), then the later stress wins ("καλημέρα" over "καλήμερα").
+    Without a frequency corpus this is a guess — a good one on average, and
+    the user's own writing overrides it as soon as they type the word."""
+    marks = [i for i, c in enumerate(unicodedata.normalize("NFD", w))
+             if unicodedata.combining(c)]
+    return (len(marks), -(marks[-1] if marks else 0))
 
 
 def _strip_accents(s):
@@ -107,7 +126,7 @@ class Predictor:
         return self._mm.rfind(b"\n", 0, pos) + 1
 
     def _dict_matches(self, key, limit):
-        """Surface forms whose key starts with `key`, in index order."""
+        """[(key, [surface forms])] whose key starts with `key`, in order."""
         self._load()
         if not self._mm:
             return []
@@ -134,7 +153,7 @@ class Predictor:
             k, _, form = self._mm[pos:end].partition(b"\t")
             if not k.startswith(target):
                 break
-            out.append((k.decode("utf-8"), form.decode("utf-8")))
+            out.append((k.decode("utf-8"), form.decode("utf-8").split("|")))
             pos = end + 1
         return out
 
@@ -143,7 +162,7 @@ class Predictor:
         """Count the words of something the user wrote or dictated."""
         changed = False
         for w in WORD_RE.findall(text or ""):
-            if len(w) < MIN_LEN:
+            if len(w) < SUGGEST_MIN:
                 continue
             slot = self.counts.setdefault(_key(w), {})
             slot[w] = slot.get(w, 0) + 1
@@ -179,14 +198,101 @@ class Predictor:
 
         if len(out) < n:                   # top up from the system dictionary
             seen = {_key(w) for w in out}
-            for k, form in self._dict_matches(key, n * 8):
+            for k, forms in self._dict_matches(key, n * 8):
                 if k == key or k in seen:
                     continue
                 seen.add(k)
-                out.append(form)
+                out.append(forms[0])
                 if len(out) == n:
                     break
         return out
+
+    # ---- spelling
+    def _lookup(self, key):
+        """The dictionary's surface forms for an exact key ([] if unknown)."""
+        for k, forms in self._dict_matches(key, 1):
+            if k == key:
+                return forms
+        return []
+
+    def _known(self, key):
+        return key in self.counts or bool(self._lookup(key))
+
+    def is_word(self, word):
+        """True when `word` stands on its own — a complete word, not a prefix
+        someone is still typing."""
+        key = _key(word)
+        return key in self.counts or bool(self._lookup(key))
+
+    def _edits1(self, key):
+        """Every one-edit neighbour of `key` that the dictionary knows."""
+        out = []
+        for i in range(len(key) + 1):
+            a, b = key[:i], key[i:]
+            if b:
+                out.append(a + b[1:])                       # delete
+                if len(b) > 1:
+                    out.append(a + b[1] + b[0] + b[2:])     # transpose
+            for c in ALPHABET:
+                if b:
+                    out.append(a + c + b[1:])               # replace
+                out.append(a + c + b)                       # insert
+        seen, hits = set(), []
+        for cand in out:
+            if cand == key or cand in seen or len(cand) < MIN_LEN:
+                continue
+            seen.add(cand)
+            if self._known(cand):
+                hits.append(cand)
+        return hits
+
+    def correct_word(self, word):
+        """The word as it should be spelled, or the word itself when it is
+        already fine (or when nothing better is known).
+
+        Accents come free: keys are accent-stripped, so 'καλημερα' finds the
+        entry whose surface form is 'καλημέρα'."""
+        if len(word) < MIN_LEN or not word[:1].islower():
+            return word                    # names and short words: hands off
+        key = _key(word)
+        own = self.counts.get(key)
+        if own and word in own:
+            return word                    # the user writes it this way
+        forms = self._lookup(key)
+        if forms:
+            if word in forms:
+                return word                # a valid spelling of this word
+            if own:                        # the user's own accentuation wins
+                return max(own.items(), key=lambda kv: kv[1])[0]
+            # ponytail: no corpus frequencies, so among accent variants the
+            # first is as good a guess as any — learning fixes it with use
+            return forms[0]
+        if own:                            # learned, never in the dictionary
+            return max(own.items(), key=lambda kv: kv[1])[0]
+        best, best_score = word, 0
+        for cand in self._edits1(key):
+            score = sum((self.counts.get(cand) or {}).values()) + 1
+            if score > best_score:
+                best_score = score
+                best = (max(self.counts[cand].items(),
+                            key=lambda kv: kv[1])[0] if cand in self.counts
+                        else (self._lookup(cand) or [word])[0])
+        return best
+
+    def correct_text(self, text):
+        """(corrected text, number of words changed). Punctuation, spacing and
+        anything that is not a word are left exactly as they were."""
+        changed = 0
+        out = []
+        pos = 0
+        for m in WORD_RE.finditer(text or ""):
+            fixed = self.correct_word(m.group())
+            out.append(text[pos:m.start()])
+            out.append(fixed)
+            changed += fixed != m.group()
+            pos = m.end()
+        out.append(text[pos:])
+        return "".join(out), changed
 
     def completion(self, prefix, choice):
         """The part still missing — what to type to turn prefix into choice.
@@ -218,11 +324,31 @@ def demo():
         fresh._load()
         lines = bytes(fresh._mm).decode("utf-8").splitlines()
         for probe in ("α", "ζω", "καλημ", "υπολογιστ", "ωφελ", "ξζξζ"):
-            want = [ln.split("\t")[1] for ln in lines
+            want = [ln.split("\t")[1].split("|") for ln in lines
                     if ln.split("\t")[0].startswith(probe)][:5]
             have = [f for _, f in fresh._dict_matches(probe, 5)]
             assert have == want, (probe, have[:3], want[:3])
-    print("ok", p.suggest("μιλ"), fresh.suggest("υπολογ"))
+    # spelling: accents come free from the stripped keys, typos need an edit
+    if os.path.exists(HUNSPELL):
+        assert fresh.correct_word("ελληνικα") == "ελληνικά"
+        assert fresh.correct_word("ολα") == "όλα"      # three letters count
+        assert fresh.correct_word("καλημερα") == "καλημέρα"   # not καλήμερα
+        assert fresh.correct_word("υπαγόρευση") == "υπαγόρευση"  # not -σή
+        # both accentuations exist in the dictionary: neither may be rewritten
+        assert fresh.correct_word("καλημέρα") == "καλημέρα"
+        assert fresh.correct_word("καλήμερα") == "καλήμερα"
+        assert fresh.correct_word("καλημερα") in ("καλημέρα", "καλήμερα")
+        assert fresh.correct_word("Παπαδόπουλος") == "Παπαδόπουλος"  # a name
+        fixed, n = fresh.correct_text("ελληνικα, ολα καλα;")
+        assert n == 3 and fixed.endswith(";") and "," in fixed, (fixed, n)
+        assert fresh.correct_text("")[0] == ""
+
+        # a word the user really writes is never "corrected" away
+        mine = Predictor()
+        mine.learn("Κοτρωνάκης κοτρωνάκης κοτρωνάκης")
+        assert mine.correct_word("κοτρωνάκης") == "κοτρωνάκης"
+    print("ok", p.suggest("μιλ"), fresh.suggest("υπολογ"),
+          fresh.correct_text("ελληνικα ολα καλα"))
 
 
 if __name__ == "__main__":

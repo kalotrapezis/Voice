@@ -36,6 +36,7 @@ from gi.repository import Gtk, Gdk, Gio, GLib, GObject, Pango
 
 # shared engines with the Tkinter app (no UI is created by importing these)
 import voice_keyboard as vk
+import predict
 import read_aloud as ra
 import clipboard as clipmod
 import platform_io
@@ -705,6 +706,19 @@ def kwin_keep_above(rule_id, enabled):
             continue
 
 
+_PREDICTOR = None
+
+
+def predictor():
+    """Shared word predictor. Built on first use — the dictionary index is
+    only touched then, so a user who never opens the notepad never pays."""
+    global _PREDICTOR
+    if _PREDICTOR is None:
+        _PREDICTOR = predict.Predictor(
+            learned_path=os.path.join(ra.voice_data_dir(), "words.json"))
+    return _PREDICTOR
+
+
 def dim(label, small=True):
     label.add_css_class("dim-label")
     if small:
@@ -1333,6 +1347,160 @@ class ClipboardPage(Gtk.Box):
         ConfirmClearDialog(self.win).present()
 
 
+class NotepadPage(Gtk.Box):
+    """Page: Σημειωματάριο — a plain editor that predicts and corrects.
+
+    Inside our own window none of the AT-SPI guesswork applies: we own the
+    buffer, so the half-typed word is simply there. Space takes the first
+    suggestion (that is the whole interaction — no extra chord to learn), the
+    chips are clickable for the other two, and Escape dismisses them."""
+
+    def __init__(self, win):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.win = win
+        self.suggestions = []
+        self.space_completes = False
+
+        paste = Gtk.Button(label="Επικόλληση")
+        paste.connect("clicked", self._on_paste)
+        fix = Gtk.Button(label="Διόρθωση")
+        fix.add_css_class("suggested-action")
+        fix.connect("clicked", self._on_correct)
+        copy = Gtk.Button(label="Αντιγραφή")
+        copy.connect("clicked", self._on_copy)
+        self.append(page_header("Σημειωματάριο", paste, fix, copy))
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       margin_top=14, margin_bottom=14,
+                       margin_start=26, margin_end=26)
+
+        self.view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                 left_margin=12, right_margin=12,
+                                 top_margin=10, bottom_margin=10)
+        self.buf = self.view.get_buffer()
+        self.buf.connect("changed", self._on_changed)
+        self.buf.connect("mark-set", lambda *_: self._update_counts())
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key)
+        self.view.add_controller(keys)
+        frame = Gtk.Box(vexpand=True)
+        frame.add_css_class("voice-card")
+        frame.append(scrolled(self.view))
+        body.append(frame)
+
+        self.chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.hint = dim(Gtk.Label(label="", xalign=0), small=False)
+        self.chips.append(self.hint)
+        body.append(self.chips)
+
+        self.counts = dim(Gtk.Label(
+            label="λέξεις 0 · χαρακτήρες 0", xalign=0), small=False)
+        body.append(self.counts)
+        self.append(body)
+
+    # ---- prediction
+    def _word_before_cursor(self):
+        """(prefix, start iter, end iter) for the word being typed."""
+        end = self.buf.get_iter_at_mark(self.buf.get_insert())
+        start = end.copy()
+        while start.backward_char():
+            if not start.get_char().isalpha():
+                start.forward_char()
+                break
+        return self.buf.get_text(start, end, False), start, end
+
+    def _on_changed(self, *_):
+        self._update_counts()
+        prefix, _, _ = self._word_before_cursor()
+        self.suggestions = predictor().suggest(prefix) if prefix else []
+        # Space completes only a half-typed word. Type "καλά" in full and
+        # Space must stay a space, or every short word grows a tail.
+        self.space_completes = bool(self.suggestions) and \
+            not predictor().is_word(prefix)
+        self._show_chips()
+
+    def _show_chips(self):
+        while (c := self.chips.get_first_child()):
+            self.chips.remove(c)
+        if not self.suggestions:
+            self.chips.append(self.hint)
+            self.hint.set_label("")
+            return
+        for i, word in enumerate(self.suggestions):
+            b = Gtk.Button(label=word)
+            b.add_css_class("kbd-chip" if i else "suggested-action")
+            b.connect("clicked", lambda _b, w=word: self._accept(w))
+            self.chips.append(b)
+        self.chips.append(dim(Gtk.Label(
+            label=("  Κενό → πρώτη πρόταση · Esc για ακύρωση"
+                   if self.space_completes else "  Κλικ για συμπλήρωση"))))
+
+    def _accept(self, word):
+        prefix, start, end = self._word_before_cursor()
+        if not prefix:
+            return
+        self.buf.delete(start, end)
+        self.buf.insert_at_cursor(word + " ")
+        self.suggestions = []
+        self._show_chips()
+        self.view.grab_focus()
+
+    def _on_key(self, ctl, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape and self.suggestions:
+            self.suggestions = []
+            self._show_chips()
+            return True
+        if keyval == Gdk.KEY_space and self.suggestions \
+                and self.space_completes \
+                and not (state & Gdk.ModifierType.CONTROL_MASK):
+            self._accept(self.suggestions[0])
+            return True                    # swallow the space we just added
+        return False
+
+    # ---- counts
+    def _update_counts(self):
+        text = self.buf.get_text(*self.buf.get_bounds(), False)
+        label = f"λέξεις {len(text.split())} · χαρακτήρες {len(text)}"
+        sel = self.buf.get_selection_bounds()
+        if sel:
+            picked = self.buf.get_text(sel[0], sel[1], False)
+            label = (f"λέξεις {len(text.split())} ({len(picked.split())})"
+                     f" · χαρακτήρες {len(text)} ({len(picked)})")
+        self.counts.set_label(label)
+
+    # ---- actions
+    def _on_paste(self, btn):
+        self.get_clipboard().read_text_async(None, self._pasted)
+
+    def _pasted(self, clipboard, result):
+        try:
+            text = clipboard.read_text_finish(result)
+        except GLib.Error:
+            return
+        if text:
+            self.buf.insert_at_cursor(text)
+            predictor().learn(text)
+
+    def _on_copy(self, btn):
+        self.get_clipboard().set(
+            self.buf.get_text(*self.buf.get_bounds(), False))
+
+    def _on_correct(self, btn):
+        """Fix the selection, or the whole note when nothing is selected."""
+        sel = self.buf.get_selection_bounds()
+        start, end = sel if sel else self.buf.get_bounds()
+        text = self.buf.get_text(start, end, False)
+        fixed, n = predictor().correct_text(text)
+        if n:
+            self.buf.delete(start, end)
+            self.buf.insert(start, fixed)
+        predictor().learn(fixed)
+        self.hint.set_label(f"Διορθώθηκαν {n} λέξεις" if n
+                            else "Καμία διόρθωση — όλα σωστά")
+        self._show_chips() if self.suggestions else None
+
+
 class SettingsPage(Gtk.Box):
     """Page: Ρυθμίσεις — grouped GNOME-style settings cards."""
 
@@ -1448,7 +1616,8 @@ class SettingsPage(Gtk.Box):
         feat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.feature_toggles = {}
         feats = [("dictation", "🎤  Υπαγόρευση"), ("read", "📖  Ανάγνωση"),
-                 ("meeting", "📝  Σύσκεψη"), ("clipboard", "📋  Πρόχειρο")]
+                 ("meeting", "📝  Σύσκεψη"), ("notepad", "📝  Σημειωματάριο"),
+                 ("clipboard", "📋  Πρόχειρο")]
         for i, (key, label) in enumerate(feats):
             sw = Gtk.Switch(active=True)
             sw.connect("notify::active",
@@ -2077,6 +2246,7 @@ class MainWindow(Gtk.ApplicationWindow):
     PAGES = [("dictation", "Υπαγόρευση", "mic"),
              ("read", "Ανάγνωση", "speaker"),
              ("meeting", "Σύσκεψη", "meeting"),
+             ("notepad", "Σημειωματάριο", "notepad"),
              ("clipboard", "Πρόχειρο", "clip")]
 
     def __init__(self, app):
@@ -2140,7 +2310,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # bind self.pages after every page was already built
         self.pages = {}
         for key, cls in (("dictation", DictationPage), ("read", ReadPage),
-                         ("meeting", MeetingPage), ("clipboard", ClipboardPage),
+                         ("meeting", MeetingPage), ("notepad", NotepadPage),
+                         ("clipboard", ClipboardPage),
                          ("settings", SettingsPage)):
             self.pages[key] = cls(self)
         for key, page in self.pages.items():
@@ -2209,7 +2380,12 @@ class MainWindow(Gtk.ApplicationWindow):
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         role = "gear" if icon == "settings-gear" else icon
-        box.append(svg_icon(icon_for(role), 18))
+        if role in _ICONS:
+            box.append(svg_icon(icon_for(role), 18))
+        else:                              # no SVG drawn for it yet
+            img = Gtk.Image.new_from_icon_name("document-edit-symbolic")
+            img.set_pixel_size(18)
+            box.append(img)
         box.append(Gtk.Label(label=label, xalign=0))
         row.set_child(box)
         row.page_key = key
