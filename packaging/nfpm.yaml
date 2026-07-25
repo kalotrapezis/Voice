@@ -81,6 +81,8 @@ contents:
     dst: /usr/lib/voice/predict.py
   - src: llm.py
     dst: /usr/lib/voice/llm.py
+  - src: data/el_freq.txt
+    dst: /usr/lib/voice/data/el_freq.txt
 
   # runtime icon used by the app + the bundled Piper engine
   - src: Assets/VoiceIcon.png

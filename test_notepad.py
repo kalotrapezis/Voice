@@ -76,6 +76,15 @@ def main():
     assert p.buf.get_text(*p.buf.get_bounds(), False) == "θα γράψ"
     assert p._on_key(None, Gdk.KEY_Tab, 0, 0) is False     # nothing to walk
 
+    # the word before the cursor is passed as context, and learned pairs win
+    g.predictor().learn("η άνοιξη ήρθε. η άνοιξη μου αρέσει. να ανοίξω πόρτα.")
+    p.buf.set_text("η ανοιξ")
+    p._on_changed()
+    assert p.suggestions[0] == "άνοιξη", p.suggestions
+    p.buf.set_text("να ανοιξ")
+    p._on_changed()
+    assert p.suggestions[0] == "ανοίξω", p.suggestions
+
     # counts, with the selection in parentheses
     p.buf.set_text("ένα δύο τρία")
     p._update_counts()
@@ -99,11 +108,10 @@ def main():
 
 
 def popover_follows_caret():
-    """The suggestion popover must sit ON the caret and below the line.
+    """The suggestion strip must sit ON the caret and below its line.
 
     Needs a mapped window and one main-loop turn: before that the text view
-    has no allocation and every coordinate reads back zero — which is also
-    how the Gdk.Rectangle kwargs bug hid, since it left the rect at 0,0,0,0.
+    has no allocation and every coordinate reads back zero.
     """
     win = Gtk.Window(default_width=600, default_height=400)
     p = g.NotepadPage(win)
@@ -115,10 +123,10 @@ def popover_follows_caret():
     def once():
         p.buf.set_text("θα γράψ")
         p._on_changed()
-        ok, rect = p.pop.get_pointing_to()
         caret = p.view.get_iter_location(
             p.buf.get_iter_at_mark(p.buf.get_insert()))
-        state.update(ok=ok, rect=rect, caret=caret)
+        state.update(pos=p.overlay_pos, caret=caret,
+                     shown=p.chips.get_visible())
         loop.quit()
         return False
 
@@ -128,11 +136,11 @@ def popover_follows_caret():
     win.destroy()
     if not state:                          # no display: nothing to check
         return
-    ok, rect, caret = state["ok"], state["rect"], state["caret"]
-    assert ok, "popover has no pointing rect"
-    assert rect.x == caret.x, (rect.x, caret.x)          # follows the cursor
-    assert rect.height == caret.height + g.NotepadPage.CARET_GAP, \
-        (rect.height, caret.height)
+    (x, y), caret = state["pos"], state["caret"]
+    assert state["shown"], "the strip should be visible with suggestions up"
+    assert x == caret.x, (x, caret.x)                    # follows the cursor
+    assert y == caret.y + caret.height + g.NotepadPage.CARET_GAP, \
+        (y, caret.y, caret.height)                       # and clears the line
 
 
 if __name__ == "__main__":

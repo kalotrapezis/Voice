@@ -21,12 +21,18 @@ import re
 import unicodedata
 
 HUNSPELL = "/usr/share/hunspell/el_GR.dic"
+# word<space>count, most frequent first (OpenSubtitles 2018, top 50k). The
+# dictionary knows which words exist; only this knows which ones people use.
+FREQ_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "data", "el_freq.txt"),
+              "/usr/lib/voice/data/el_freq.txt"]
 HUNSPELL_ENC = "iso-8859-7"
 MIN_LEN = 3                 # όλα, όχι, μια — Greek leans on short words
 SUGGEST_MIN = 4             # but completing a 3-letter word saves nobody time
 MAX_LEN = 24
 WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 ALPHABET = "αβγδεζηθικλμνξοπρστυφχψως"          # unaccented: keys are stripped
+DICT_SCAN = 600             # candidates read before ranking by frequency
 
 
 def _data_dir():
@@ -34,15 +40,34 @@ def _data_dir():
     return os.path.join(base, "voice")
 
 
-DEFAULT_INDEX = os.path.join(_data_dir(), "el_words.v2.idx")
+DEFAULT_INDEX = os.path.join(_data_dir(), "el_words.v3.idx")
+
+
+def load_frequencies():
+    """{word: count} from the bundled list, {} when it is not installed."""
+    for path in FREQ_FILES:
+        try:
+            freq = {}
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    word, _, count = line.partition(" ")
+                    if count.strip().isdigit():
+                        freq[word] = int(count)
+            if freq:
+                return freq
+        except OSError:
+            continue
+    return {}
 
 
 def build_index(path):
-    """One-off: hunspell's ISO-8859-7 word list -> sorted 'key\tform|form' lines.
+    """One-off: hunspell's word list -> sorted 'key\tform:count|form:count'.
 
-    All accent variants of a key are kept. Greek has real pairs that differ
-    only in stress (καλημέρα/καλήμερα, πότε/ποτέ); keeping one at random meant
-    "correcting" a correctly written word into its rarer twin."""
+    All accent variants of a key are kept, ordered by how often the word is
+    actually used. Greek has real pairs that differ only in stress
+    (καλημέρα/καλήμερα, πότε/ποτέ), and picking by file order meant
+    "correcting" a common word into its rare twin."""
+    freq = load_frequencies()
     forms = {}
     with open(HUNSPELL, encoding=HUNSPELL_ENC, errors="ignore") as f:
         next(f, None)                      # first line is the word count
@@ -53,8 +78,12 @@ def build_index(path):
             variants = forms.setdefault(_key(w), [])
             if w not in variants and len(variants) < 4:
                 variants.append(w)
-    rows = [k + "\t" + "|".join(sorted(v, key=_variant_rank))
-            for k, v in forms.items()]
+    rows = []
+    for k, variants in forms.items():
+        ranked = sorted(variants,
+                        key=lambda w: (-freq.get(w, 0),) + _variant_rank(w))
+        rows.append(k + "\t" + "|".join(f"{w}:{freq.get(w, 0)}"
+                                        for w in ranked))
     rows.sort()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".part"
@@ -65,13 +94,10 @@ def build_index(path):
 
 
 def _variant_rank(w):
-    """Order accent variants of the same key, most likely first.
+    """Tie-break accent variants the frequency list has never seen.
 
-    Two rules, both cheap and both earned from real output: fewer accent marks
-    wins (the dictionary lists enclitic forms like "υπαγόρευσή" beside plain
-    "υπαγόρευση"), then the later stress wins ("καλημέρα" over "καλήμερα").
-    Without a frequency corpus this is a guess — a good one on average, and
-    the user's own writing overrides it as soon as they type the word."""
+    Fewer accent marks wins (the dictionary lists enclitic forms like
+    "υπαγόρευσή" beside plain "υπαγόρευση"), then the later stress wins."""
     marks = [i for i, c in enumerate(unicodedata.normalize("NFD", w))
              if unicodedata.combining(c)]
     return (len(marks), -(marks[-1] if marks else 0))
@@ -88,6 +114,12 @@ def _key(w):
     return _strip_accents(w.lower())
 
 
+def _split_form(entry):
+    """'άνοιξη:3475' -> ('άνοιξη', 3475)."""
+    word, _, count = entry.rpartition(":")
+    return (word, int(count)) if count.isdigit() else (entry, 0)
+
+
 class Predictor:
     """Completions for a half-typed word. Load once, keep it around."""
 
@@ -95,12 +127,15 @@ class Predictor:
         self.learned_path = learned_path
         self.index_path = index_path or DEFAULT_INDEX
         self.counts = {}                  # key -> {surface form: count}
+        self.pairs = {}                   # "prev next" key -> count
         self._mm = None                   # mmap of the sorted index
         self._loaded = False
         if learned_path and os.path.exists(learned_path):
             try:
                 with open(learned_path, encoding="utf-8") as f:
-                    self.counts = json.load(f)
+                    data = json.load(f)
+                self.counts = data.get("words", data)      # v1 files were flat
+                self.pairs = data.get("pairs", {})
             except (OSError, ValueError):
                 self.counts = {}
 
@@ -153,15 +188,26 @@ class Predictor:
             k, _, form = self._mm[pos:end].partition(b"\t")
             if not k.startswith(target):
                 break
-            out.append((k.decode("utf-8"), form.decode("utf-8").split("|")))
+            out.append((k.decode("utf-8"),
+                        [_split_form(f)
+                         for f in form.decode("utf-8").split("|")]))
             pos = end + 1
         return out
 
     # ---- learning
     def learn(self, text):
-        """Count the words of something the user wrote or dictated."""
+        """Count the words — and the word pairs — of something written here.
+
+        The pairs are what make "η ανοιξ…" propose the noun: frequency lists
+        are built from subtitles, where imperatives ("άνοιξε") outrank nouns
+        ("άνοιξη") four to one, and no general list knows how *you* write."""
         changed = False
-        for w in WORD_RE.findall(text or ""):
+        words = WORD_RE.findall(text or "")
+        for i, w in enumerate(words):
+            if i:
+                pair = _key(words[i - 1]) + " " + _key(w)
+                self.pairs[pair] = self.pairs.get(pair, 0) + 1
+                changed = True
             if len(w) < SUGGEST_MIN:
                 continue
             slot = self.counts.setdefault(_key(w), {})
@@ -175,44 +221,54 @@ class Predictor:
         os.makedirs(os.path.dirname(self.learned_path), exist_ok=True)
         tmp = self.learned_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.counts, f, ensure_ascii=False)
+            json.dump({"words": self.counts, "pairs": self.pairs}, f,
+                      ensure_ascii=False)
         os.replace(tmp, self.learned_path)
 
     # ---- the actual prediction
-    def suggest(self, prefix, n=3):
-        """Up to n completions for `prefix`, best first, prefix excluded from
-        the count of what makes a suggestion useful (a completion equal to
-        what is already typed is dropped)."""
+    def suggest(self, prefix, n=3, prev=None):
+        """Up to n completions for `prefix`, best first. `prev` is the word
+        before it, which lets pairs seen here outrank raw frequency."""
         if not prefix or len(prefix) < 2:
             return []
         key = _key(prefix)
+        pkey = _key(prev) if prev else None
 
-        # own vocabulary first, most-used first
+        def pair_count(word):
+            return self.pairs.get(f"{pkey} {_key(word)}", 0) if pkey else 0
+
+        # own vocabulary first, most-used first, pairs ahead of bare counts
         hits = []
         for k, forms in self.counts.items():
             if k.startswith(key) and k != key:
                 form, count = max(forms.items(), key=lambda kv: kv[1])
-                hits.append((-count, len(form), form))
+                hits.append((-pair_count(form), -count, len(form), form))
         hits.sort()
-        out = [f for _, _, f in hits[:n]]
+        out = [h[-1] for h in hits[:n]]
 
-        if len(out) < n:                   # top up from the system dictionary
+        if len(out) < n:
+            # Rank the dictionary by how often Greeks actually use the word,
+            # not alphabetically: "ανοιξ" used to offer ανοίξαμε before
+            # άνοιξη. Scan a wide slice, then keep the most common.
             seen = {_key(w) for w in out}
-            for k, forms in self._dict_matches(key, n * 8):
+            pool = []
+            for k, forms in self._dict_matches(key, DICT_SCAN):
                 if k == key or k in seen:
                     continue
                 seen.add(k)
-                out.append(forms[0])
-                if len(out) == n:
-                    break
+                word, count = forms[0]
+                pool.append((-pair_count(word), -count, len(word), word))
+            pool.sort()
+            out += [p[-1] for p in pool[:n - len(out)]]
         return out
 
     # ---- spelling
     def _lookup(self, key):
-        """The dictionary's surface forms for an exact key ([] if unknown)."""
+        """The dictionary's surface forms for an exact key, most used first
+        ([] when the key is unknown)."""
         for k, forms in self._dict_matches(key, 1):
             if k == key:
-                return forms
+                return [w for w, _ in forms]
         return []
 
     def _known(self, key):
@@ -313,6 +369,17 @@ def demo():
     # accents are ignored while matching but kept in what gets inserted
     assert "μίλησα" in p.suggest("μιλ")
 
+    # a word pair seen here beats the subtitle frequencies: "άνοιξε" is four
+    # times more common than "άνοιξη", but not after "η"
+    ctx = Predictor()
+    assert ctx.suggest("ανοιξ", 3)[0] == "άνοιξε", ctx.suggest("ανοιξ", 3)
+    ctx.learn("η άνοιξη ήρθε νωρίς. η άνοιξη μου αρέσει.")
+    ctx.learn("να ανοίξω την πόρτα. να ανοίξω το παράθυρο.")
+    assert ctx.suggest("ανοιξ", 3, prev="η")[0] == "άνοιξη", \
+        ctx.suggest("ανοιξ", 3, prev="η")
+    assert ctx.suggest("ανοιξ", 3, prev="να")[0] == "ανοίξω", \
+        ctx.suggest("ανοιξ", 3, prev="να")
+
     # the system dictionary fills in when nothing has been learned yet
     fresh = Predictor()
     if os.path.exists(HUNSPELL):
@@ -324,8 +391,8 @@ def demo():
         fresh._load()
         lines = bytes(fresh._mm).decode("utf-8").splitlines()
         for probe in ("α", "ζω", "καλημ", "υπολογιστ", "ωφελ", "ξζξζ"):
-            want = [ln.split("\t")[1].split("|") for ln in lines
-                    if ln.split("\t")[0].startswith(probe)][:5]
+            want = [[_split_form(f) for f in ln.split("\t")[1].split("|")]
+                    for ln in lines if ln.split("\t")[0].startswith(probe)][:5]
             have = [f for _, f in fresh._dict_matches(probe, 5)]
             assert have == want, (probe, have[:3], want[:3])
     # spelling: accents come free from the stripped keys, typos need an edit

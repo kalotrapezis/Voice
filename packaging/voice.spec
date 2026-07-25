@@ -57,6 +57,7 @@ install -m644 %{projdir}/platform_io.py   $APP/
 install -m644 %{projdir}/clipboard.py     $APP/
 install -m644 %{projdir}/predict.py       $APP/
 install -m644 %{projdir}/llm.py           $APP/
+install -Dm644 %{projdir}/data/el_freq.txt $APP/data/el_freq.txt
 install -Dm644 %{projdir}/Assets/VoiceIcon.png $APP/Assets/VoiceIcon.png
 cp -a %{projdir}/piper_tts $APP/
 

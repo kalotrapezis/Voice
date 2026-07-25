@@ -70,7 +70,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.6~beta11"
+VERSION = "0.0.6~beta12"
 
 
 _DARK = None
@@ -234,6 +234,12 @@ window.voice-mini {
 }
 window.voice-mini.expanded { border-radius: 14px; }
 /* half the old height: the round buttons set the bar's thickness */
+.suggest-strip {
+  background: @theme_base_color;
+  border: 1px solid alpha(currentColor, 0.2);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
 .mini-round { border-radius: 9999px; padding: 0; }
 .mini-handle { padding: 0 4px; font-size: 10px; }
 .voice-mini button.flat { padding: 0; }
@@ -1389,6 +1395,7 @@ class NotepadPage(Gtk.Box):
         self.win = win
         self.suggestions = []
         self.picked = -1                   # which chip Tab has walked to
+        self.overlay_pos = (0, 0)
 
         self.rec = Recorder()
         self.transcriber = Transcriber()
@@ -1434,16 +1441,15 @@ class NotepadPage(Gtk.Box):
         frame.append(scrolled(self.view))
         body.append(frame)
 
-        # suggestions ride under the caret, not at the bottom of the page.
-        # autohide=False is the load-bearing bit: an autohiding popover grabs
-        # focus, and the editor you are typing in would stop receiving keys.
-        self.chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                             margin_top=4, margin_bottom=4,
-                             margin_start=6, margin_end=6)
-        self.pop = Gtk.Popover(autohide=False, has_arrow=False,
-                               position=Gtk.PositionType.BOTTOM)
-        self.pop.set_parent(self.view)
-        self.pop.set_child(self.chips)
+        # Suggestions ride under the caret as a TextView overlay, not as a
+        # popover: on Wayland a popover is its own surface and the compositor
+        # places it where it likes — on Plasma it landed over the sidebar,
+        # nowhere near the cursor. An overlay lives in buffer coordinates,
+        # scrolls with the text and cannot steal focus.
+        self.chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.chips.add_css_class("suggest-strip")
+        self.chips.set_visible(False)
+        self.view.add_overlay(self.chips, 0, 0)
 
         self.hint = dim(Gtk.Label(label="", xalign=0, hexpand=True),
                         small=False)
@@ -1466,10 +1472,17 @@ class NotepadPage(Gtk.Box):
                 break
         return self.buf.get_text(start, end, False), start, end
 
+    def _prev_word(self, start):
+        """The word before the one being typed — context for the ranking."""
+        head = self.buf.get_text(self.buf.get_start_iter(), start, False)
+        words = predict.WORD_RE.findall(head[-60:])
+        return words[-1] if words else None
+
     def _on_changed(self, *_):
         self._update_counts()
-        prefix, _, _ = self._word_before_cursor()
-        self.suggestions = predictor().suggest(prefix) if prefix else []
+        prefix, start, _ = self._word_before_cursor()
+        self.suggestions = (predictor().suggest(prefix, prev=self._prev_word(start))
+                            if prefix else [])
         self.picked = -1                   # a fresh word highlights nothing
         self._show_chips()
 
@@ -1477,7 +1490,7 @@ class NotepadPage(Gtk.Box):
         while (c := self.chips.get_first_child()):
             self.chips.remove(c)
         if not self.suggestions:
-            self.pop.popdown()
+            self.chips.set_visible(False)
             return
         for i, word in enumerate(self.suggestions):
             b = Gtk.Button(label=word)
@@ -1486,26 +1499,19 @@ class NotepadPage(Gtk.Box):
             b.connect("clicked", lambda _b, w=word: self._accept(w))
             self.chips.append(b)
         self._point_at_caret()
-        self.pop.popup()
+        self.chips.set_visible(True)
 
-    # the popover sits this far below the caret: pinned to the caret box
-    # itself it covered the line being written
-    CARET_GAP = 16
+    # the strip sits this far below the caret: pinned to the caret box itself
+    # it covered the line being written
+    CARET_GAP = 6
 
     def _point_at_caret(self):
-        """Park the popover under the caret, clear of the current line."""
+        """Move the strip under the caret. get_iter_location already gives
+        buffer coordinates, which is exactly what move_overlay wants."""
         it = self.buf.get_iter_at_mark(self.buf.get_insert())
         r = self.view.get_iter_location(it)
-        x, y = self.view.buffer_to_window_coords(
-            Gtk.TextWindowType.WIDGET, r.x, r.y)
-        # Gdk.Rectangle is a boxed struct: PyGObject ignores constructor
-        # kwargs (silently, with all fields left at 0), so the popover was
-        # being pointed at the widget's top-left corner all along
-        rect = Gdk.Rectangle()
-        rect.x, rect.y = x, y
-        rect.width = max(r.width, 1)
-        rect.height = max(r.height, 1) + self.CARET_GAP
-        self.pop.set_pointing_to(rect)
+        self.overlay_pos = (r.x, r.y + max(r.height, 1) + self.CARET_GAP)
+        self.view.move_overlay(self.chips, *self.overlay_pos)
 
     def _accept(self, word):
         prefix, start, end = self._word_before_cursor()
