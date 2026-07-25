@@ -163,7 +163,8 @@ def start_server(timeout=120):
         return False
     _PORT = _free_port()
     _SERVER = subprocess.Popen(
-        [exe, "-m", model_path(), "-t", str(vk.THREADS), "-c", "4096",
+        [exe, "-m", model_path(), "-t", str(vk.THREADS),
+         "-c", str(SERVER_CTX),
          # three slots so three continuations are generated at once instead
          # of one after the other
          "--parallel", "3",
@@ -196,7 +197,81 @@ def stop_server():
     _SERVER = None
 
 
-def next_words(context, words=8, timeout=30, temperature=0, seed=-1):
+# Gemma 3 itself takes 128k tokens; the limit here is RAM. 16384 across three
+# slots leaves ~5400 tokens each, and Greek runs 2-3 characters per token, so
+# the verbatim tail is capped well inside that and the rest of the note is
+# carried as the outline below.
+SERVER_CTX = 16384
+CONTEXT_CHARS = 6000
+SUMMARY_WORDS = 3
+
+
+def _tail(text):
+    """The last CONTEXT_CHARS, cut back to a sentence start where possible —
+    handed half a sentence, the model spends its budget finishing that."""
+    tail = text[-CONTEXT_CHARS:]
+    if len(text) > CONTEXT_CHARS:
+        for mark in (". ", "\n", "; ", "· "):
+            cut = tail.find(mark)
+            if 0 <= cut < 600:
+                return tail[cut + len(mark):]
+    return tail
+
+
+def _end_at_sentence(text):
+    """Trim a continuation to its last finished sentence.
+
+    The token budget runs out mid-thought otherwise, and half a sentence is
+    worse than a short one: you cannot tell whether to keep typing."""
+    text = text.rstrip()
+    best = max(text.rfind(m) for m in (".", ";", "!", "·", "?", "…"))
+    return text[:best + 1] if best > 0 else text
+
+
+# ---- outline memory: each paragraph in two or three words, cached by text
+_SUMMARIES = {}
+
+
+def summarize(paragraph, timeout=20):
+    """Two or three words for one paragraph, remembered between calls."""
+    key = paragraph.strip()[:400]
+    if key in _SUMMARIES:
+        return _SUMMARIES[key]
+    if not server_running() or len(key) < 40:
+        return ""
+    prompt = (f"<start_of_turn>user\nΠερίγραψε σε {SUMMARY_WORDS} λέξεις το "
+              f"θέμα της παραγράφου. Μόνο τις λέξεις.\n\n{key}"
+              "<end_of_turn>\n<start_of_turn>model\n")
+    # 12 tokens cut Greek words in half ("ειλικ"): ask for more and keep
+    # whole words only
+    body = json.dumps({"prompt": prompt, "n_predict": 28, "temperature": 0,
+                       "stop": ["\n"]}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{_PORT}/completion", body,
+                                 {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            words = json.load(r).get("content", "").strip().split()
+    except (urllib.error.URLError, OSError, ValueError):
+        return ""
+    summary = " ".join(w for w in words[:SUMMARY_WORDS]
+                       if len(w) > 1).strip(" .,·")
+    _SUMMARIES[key] = summary
+    return summary
+
+
+def outline(text):
+    """'1) θέμα · 2) θέμα' for every paragraph but the one being written."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    notes = []
+    for i, para in enumerate(paras[:-1], 1):           # the last one is context
+        summary = summarize(para)
+        if summary:
+            notes.append(f"{i}) {summary}")
+    return " · ".join(notes)
+
+
+def next_words(context, words=8, timeout=30, temperature=0, seed=-1,
+               memory=""):
     """What the model would write next — '' when it has nothing or is off.
 
     A phrase, not a word: the dictionary already completes words, and with a
@@ -204,9 +279,12 @@ def next_words(context, words=8, timeout=30, temperature=0, seed=-1):
     before the cursor, so it can answer 'στις τρεις το …' with 'απόγευμα'."""
     if not context.strip() or not server_running():
         return ""
-    body = json.dumps({"prompt": context[-600:], "n_predict": words * 4,
+    prompt = _tail(context)
+    if memory:
+        prompt = f"[Το κείμενο ως εδώ: {memory}]\n\n{prompt}"
+    body = json.dumps({"prompt": prompt, "n_predict": words * 3,
                        "temperature": temperature, "seed": seed,
-                       "stop": ["\n"]}).encode()
+                       "stop": ["\n\n", "[Το κείμενο"]}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{_PORT}/completion", body,
                                  {"Content-Type": "application/json"})
     try:
@@ -218,7 +296,8 @@ def next_words(context, words=8, timeout=30, temperature=0, seed=-1):
     # but preserve the leading space, or its absence: asked to continue
     # "δουλειά πολ" the answer is "λή", which must not gain a space.
     lead = text[:len(text) - len(text.lstrip())]
-    body = " ".join(text.split()[:words])
+    body = _end_at_sentence(" ".join(text.split()[:words * 2]))
+    body = " ".join(body.split()[:words * 2])
     return (lead + body) if body else ""
 
 
@@ -229,12 +308,13 @@ def next_phrases(context, count=3, words=8, timeout=40):
     sentence three times — with the seed varied per slot."""
     if not context.strip() or not server_running():
         return []
+    memory = outline(context)              # what the earlier paragraphs said
     out = [None] * count
     threads = []
 
     def one(i):
         out[i] = next_words(context, words=words, timeout=timeout,
-                            temperature=0.8, seed=i + 1)
+                            temperature=0.8, seed=i + 1, memory=memory)
 
     for i in range(count):
         t = threading.Thread(target=one, args=(i,), daemon=True)
@@ -255,6 +335,21 @@ def demo():
     print("binary:", binary() or "—")
     print("model :", model_path(), "✓" if installed() else "(δεν έχει ληφθεί)")
     print("ram   :", ram_check())
+
+    # half a sentence is worse than a short one
+    assert _end_at_sentence("Πρώτη πρόταση. Δεύτερη μισ") == "Πρώτη πρόταση."
+    assert _end_at_sentence("χωρίς τελεία") == "χωρίς τελεία"
+
+    # the outline stays quiet with no server, and never summarises the
+    # paragraph being written (that one goes in verbatim)
+    assert outline("μία παράγραφος μόνο") == ""
+    assert summarize("κάτι μικρό") == ""
+
+    # the model reads the tail of the note, cut at a sentence start
+    assert _tail("μικρό κείμενο") == "μικρό κείμενο"
+    long_note = "Πρώτη πρόταση κομμένη. " + ("Μια πρόταση εδώ. " * 200)
+    tail = _tail(long_note)
+    assert len(tail) <= CONTEXT_CHARS and not tail.startswith("ταση"), tail[:20]
 
     # chunking must never lose or reorder text
     long_text = ("Πρώτη πρόταση. " * 40).strip()
