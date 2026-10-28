@@ -6,6 +6,8 @@
 Για τον μαθητή που δεν ακούει, για τον μαθητή που δεν ξέρει ελληνικά, και για τον εκπαιδευτικό που θέλει πρακτικά
 του μαθήματος. Δωρεάν και χωρίς internet, ή με κλειδί Mistral / OpenAI για όποιο σχολείο θέλει ακόμα μεγαλύτερη ακρίβεια.</p>
 
+<p align="center"><a href="https://kalotrapezis.github.io/Voice/"><b>kalotrapezis.github.io/Voice</b></a></p>
+
 ## Λήψη
 
 **0.1.0 Beta 1** ([τι νέο υπάρχει](https://github.com/kalotrapezis/Voice/releases/tag/v0.1.0-beta.1)). Είναι beta:
