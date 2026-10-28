@@ -39,7 +39,16 @@
         "!node_modules/onnxruntime-node/bin/napi-v*/win32/**"
       ],
       "syncDesktopName": true,
-      "executableName": "voice-desktop"
+      "executableName": "voice-desktop",
+      "extraResources": [
+        {
+          "from": "whisper-bin",
+          "to": "whisper",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "win": {
       "icon": "build/icon.png",
@@ -51,24 +60,6 @@
         {
           "from": "whisper-win",
           "to": "whisper",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
-          "from": "../models/bergamot",
-          "to": "models/bergamot",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
-          "from": "../THIRD-PARTY-NOTICES.md",
-          "to": "THIRD-PARTY-NOTICES.md"
-        },
-        {
-          "from": "../licenses",
-          "to": "licenses",
           "filter": [
             "**/*"
           ]
@@ -85,13 +76,6 @@
       ]
     },
     "extraResources": [
-      {
-        "from": "whisper-bin",
-        "to": "whisper",
-        "filter": [
-          "**/*"
-        ]
-      },
       {
         "from": "../models/bergamot",
         "to": "models/bergamot",
