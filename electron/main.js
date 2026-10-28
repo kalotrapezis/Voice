@@ -152,7 +152,11 @@ ipcMain.handle('models:download', async (e, id) => {
       const dest = path.join(MODELS_HOME, f.path);
       if (packReady({ files: [f] })) { done += f.size; continue; }
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      await fetchResumable(MODEL_URL + f.path.replaceAll('/', '__'), dest, f, ctl.signal, n => { report('down'); done += n; });
+      const urls = [MODEL_URL + f.path.replaceAll('/', '__'), f.mirror].filter(Boolean);
+      for (let i = 0; ; i++) {
+        try { await fetchResumable(urls[i], dest, f, ctl.signal, n => { report('down'); done += n; }); break; }
+        catch (err) { if (ctl.signal.aborted || i + 1 >= urls.length || !/HTTP 404/.test(err.message)) throw err; } // not on our repo: the mirror
+      }
     }
     report('ready');
   } catch (err) {

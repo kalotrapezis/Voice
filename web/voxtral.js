@@ -79,7 +79,9 @@ function terms(text) {
 const MODEL_URL = 'https://github.com/kalotrapezis/voice-models/releases/download/v1/';
 const MODEL_PACKS = [
   { id: 'whisper', name: 'Αναγνώριση ομιλίας: Whisper Medium', note: 'Γράφει ό,τι λέτε, χωρίς internet. Με κάρτα γραφικών ~1–2 s ανά φράση.',
-    files: [{ path: 'ggml-medium-q8_0.bin', size: 823369779, sha256: '42a1ffcbe4167d224232443396968db4d02d4e8e87e213d3ee2e03095dea6502' }] },
+    // the same file whisper.cpp publishes, pinned to a commit: a second source while ours is missing or down
+    files: [{ path: 'ggml-medium-q8_0.bin', size: 823369779, sha256: '42a1ffcbe4167d224232443396968db4d02d4e8e87e213d3ee2e03095dea6502',
+      mirror: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium-q8_0.bin' }] },
   { id: 'voice', name: 'Ελληνική φωνή: Meta MMS', note: 'Διαβάζει κείμενα φωναχτά, χωρίς internet. Άδεια μόνο για μη εμπορική χρήση.',
     files: [{ path: 'mms-tts-ell/model.onnx', size: 114230384, sha256: '38e3c9824ee483e548e921aba2647378940659e528194ccc59a1e1cb44fb8dc1' },
             { path: 'mms-tts-ell/tokens.json', size: 668, sha256: '765bdf002eb913905dd9cb015755aa7aec24196458d177f06a5cb6b10cfa8de2' }] },
