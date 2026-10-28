@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOICE</title>
+<meta name="description" content="VOICE: υπότιτλοι, μετάφραση και ανάγνωση στα ελληνικά, για την τάξη. Δωρεάν και χωρίς internet, για Linux, Windows και Android.">
+<meta property="og:title" content="VOICE">
+<meta property="og:description" content="Υπότιτλοι, μετάφραση και ανάγνωση στα ελληνικά, για την τάξη. Δωρεάν και χωρίς internet.">
+<meta property="og:image" content="img/teleprompt.jpg">
+<link rel="icon" href="img/voice.png">
+<style>
+  :root { --bg: #0e1213; --card: #172022; --line: #263133; --text: #f2f6f6; --muted: #aab8b9; --teal: #2fd3c6;
+          --linux: #0e8c85; --deb: #177bfc; --win: #2f5fd0; --android: #3a4f58; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.6 system-ui, "Noto Sans", "Segoe UI", sans-serif; }
+  a { color: var(--teal); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+  header { padding: 56px 0 24px; text-align: center;
+           /* teal from the icon, lit from the corners */
+           background: radial-gradient(800px 520px at 0% 0%, rgba(47, 211, 198, .28) 0%, transparent 70%),
+                       radial-gradient(800px 520px at 100% 0%, rgba(23, 123, 252, .26) 0%, transparent 70%),
+                       radial-gradient(900px 560px at 50% 110%, rgba(14, 140, 133, .30) 0%, transparent 70%); }
+  header img.logo { width: 128px; height: 128px; filter: drop-shadow(0 0 28px rgba(47, 211, 198, .25)); }
+  h1 { font-size: clamp(40px, 7vw, 72px); margin: 8px 0 4px; letter-spacing: -1px; }
+  .lead { font-size: clamp(18px, 2.4vw, 22px); color: var(--muted); max-width: 760px; margin: 0 auto 28px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; margin: 0 0 32px; }
+  .btn { display: flex; align-items: center; gap: 14px; padding: 14px 22px 14px 14px; border-radius: 22px; color: #fff;
+         text-decoration: none; min-width: 250px; text-align: left; transition: transform .15s, filter .15s; }
+  .btn:hover { transform: translateY(-2px); filter: brightness(1.12); }
+  .btn img { width: 52px; height: 52px; border-radius: 13px; }
+  .btn b { display: block; font-size: 20px; } .btn span { font-size: 14px; opacity: .85; }
+  .linux { background: var(--linux); } .deb { background: var(--deb); } .win { background: var(--win); } .android { background: var(--android); }
+  .hero { width: 100%; border-radius: 22px; display: block; border: 1px solid var(--line); }
+  .beta { color: var(--muted); font-size: 15px; margin: 16px 0 0; }
+  section { padding: 56px 0 8px; }
+  h2 { font-size: clamp(28px, 4vw, 40px); margin: 0 0 8px; text-align: center; }
+  .sub { color: var(--muted); max-width: 780px; margin: 0 auto; text-align: center; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; margin-top: 26px; }
+  .tile { background: linear-gradient(160deg, color-mix(in srgb, var(--c) 22%, var(--card)) 0%, var(--card) 55%);
+          border: 1px solid var(--line); border-radius: 22px; padding: 22px; }
+  .tile .ic { width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center; background: var(--c); color: #fff; }
+  .tile h3 { margin: 12px 0 6px; font-size: 21px; } .tile p { margin: 0; color: var(--muted); font-size: 16px; }
+  .tile b { color: var(--text); }
+  .island { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; background: #000; border: 1px solid var(--line);
+            border-radius: 30px; padding: 8px; margin: 26px auto 22px; width: fit-content; max-width: 100%; }
+  .island button { font: inherit; font-size: 15px; font-weight: 600; color: var(--text); background: transparent; border: 0;
+                   border-radius: 999px; padding: 9px 18px; cursor: pointer; }
+  .island button:hover { background: #22292b; }
+  .island button[aria-selected="true"] { background: var(--teal); color: #071312; }
+  .island button:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+  [role="tabpanel"] > p { text-align: center; color: var(--muted); max-width: 760px; margin: 0 auto 18px; }
+  [role="tabpanel"] img, .cards-small img { width: 100%; max-width: 980px; display: block; margin: 0 auto; border-radius: 18px; border: 1px solid var(--line); }
+  .cards-small { display: none; gap: 18px; margin-top: 22px; }
+  .cards-small figure { margin: 0; } figcaption { color: var(--muted); font-size: 14px; margin-top: 8px; text-align: center; }
+  .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 18px; margin-top: 26px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 22px; }
+  .panel h3 { margin: 0 0 6px; font-size: 24px; } .panel p, .panel li { color: var(--muted); margin: 0 0 6px; font-size: 16px; }
+  .panel ul { padding-left: 20px; margin: 8px 0; }
+  .panel .btn { min-width: 0; margin-top: 12px; }
+  .panel b { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 15px; }
+  th, td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--text); font-weight: 600; width: 32%; } td { color: var(--muted); }
+  .wide { margin-top: 18px; }
+  code { background: #000; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 14px; }
+  footer { color: #7d8b8c; font-size: 14px; padding: 48px 0 40px; text-align: center; }
+  @media (max-width: 700px) {  /* a phone: the tabs would not fit, so the screenshots one under another */
+    .cards-small { display: grid; }
+    .island, [role="tabpanel"] { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <img class="logo" src="img/voice.png" alt="">
+    <h1>VOICE</h1>
+    <p class="lead">Υπότιτλοι, μετάφραση και ανάγνωση στα ελληνικά, για την τάξη. Για τον μαθητή που δεν ακούει, για τον μαθητή που δεν ξέρει ελληνικά, και για τον εκπαιδευτικό. Δωρεάν και χωρίς internet.</p>
+    <div class="buttons">
+      <a class="btn linux" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.AppImage"><img src="img/voice.png" alt=""><div><b>Linux AppImage</b><span>κάθε διανομή · 199 MB</span></div></a>
+      <a class="btn deb" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/voice-desktop_0.1.0-beta.1_amd64.deb"><img src="img/voice.png" alt=""><div><b>Linux .deb</b><span>Ubuntu · Mint · Debian · 155 MB</span></div></a>
+      <a class="btn win" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.exe"><img src="img/voice.png" alt=""><div><b>Windows</b><span>φορητό .exe · 175 MB</span></div></a>
+      <a class="btn android" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.apk"><img src="img/voice.png" alt=""><div><b>Android</b><span>APK · tablet και κινητό · 32 MB</span></div></a>
+    </div>
+    <img class="hero" src="img/teleprompt.jpg" alt="Το Teleprompt: μεγάλοι υπότιτλοι, γρήγορες ερωτήσεις και το μήνυμα του μαθητή">
+    <p class="beta">Έκδοση 0.1.0 beta 1 · <a href="https://github.com/kalotrapezis/Voice/releases/tag/v0.1.0-beta.1">τι νέο υπάρχει</a> · δοκιμάστε το πρώτα εσείς, πριν το δώσετε σε μαθητή.</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Τι κάνει το VOICE στην τάξη</h2>
+    <div class="tiles">
+      <div class="tile" style="--c:#0e8c85"><div class="ic"><svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.5,4v3h5v12h3V7h5V4H2.5zM21.5,9h-9v3h3v7h3v-7h3V9z"/></svg></div><h3>Υπότιτλοι για μαθητή που δεν ακούει</h3><p>Ό,τι λέτε γράφεται με <b>μεγάλα γράμματα που κυλούν αργά</b>. Μέγεθος και ταχύτητα με δύο ρυθμιστικά, με δόνηση σε κάθε βήμα στο tablet. Φωτεινό ή σκούρο φόντο, πλήρης οθόνη.</p></div>
+      <div class="tile" style="--c:#177bfc"><div class="ic"><svg width="30" height="30" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M560-131v-62q97-28 158.5-107.5T780-481q0-101-61-181T560-769v-62q124 28 202 125.5T840-481q0 127-78 224.5T560-131ZM120-360v-240h160l200-200v640L280-360H120Zm420 48v-337q55 17 87.5 64T660-480q0 57-33 104t-87 64ZM420-634 307-540H180v120h127l113 95v-309Zm-94 154Z"/></svg></div><h3>Ο μαθητής απαντά</h3><p>Γράφει στο <b>«Μήνυμα στον δάσκαλο»</b> και το tablet το διαβάζει φωναχτά. Ένα κουμπί ανεβάζει το πλαίσιο πάνω από το πληκτρολόγιο.</p></div>
+      <div class="tile" style="--c:#8a5cf6"><div class="ic"><svg width="30" height="30" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M240-400h320v-80H240v80Zm0-120h480v-80H240v80Zm0-120h480v-80H240v80ZM80-80v-720q0-33 23.5-56.5T160-880h640q33 0 56.5 23.5T880-800v480q0 33-23.5 56.5T800-240H240L80-80Zm126-240h594v-480H160v525l46-45Zm-46 0v-480 480Z"/></svg></div><h3>Γρήγορες ερωτήσεις</h3><p>Από όσα λέτε, το VOICE προτείνει <b>τρεις σύντομες ερωτήσεις</b>, και ο μαθητής ρωτά με ένα άγγιγμα, χωρίς να προλαβαίνει να γράψει.</p></div>
+      <div class="tile" style="--c:#e0861a"><div class="ic"><svg width="30" height="30" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M320-440v-287L217-624l-57-56 200-200 200 200-57 56-103-103v287h-80ZM600-80 400-280l57-56 103 103v-287h80v287l103-103 57 56L600-80Z"/></svg></div><h3>Μετάφραση χωρίς internet</h3><p>Για μαθητές που δεν ξέρουν ελληνικά: <b>ελληνικά ↔ αγγλικά στη συσκευή</b>, σε κλάσματα του δευτερολέπτου. Με κλειδί Mistral ή OpenAI και σε αλβανικά, αραβικά, ουκρανικά και άλλες γλώσσες.</p></div>
+      <div class="tile" style="--c:#2f9d5f"><div class="ic"><svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12,14c1.66,0 2.99,-1.34 2.99,-3L15,5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6c0,1.66 1.34,3 3,3zM17.3,11c0,3 -2.54,5.1 -5.3,5.1S6.7,14 6.7,11L5,11c0,3.41 2.72,6.23 6,6.72L11,21h2v-3.28c3.28,-0.48 6,-3.3 6,-6.72h-1.7z"/></svg></div><h3>Σύσκεψη και υπαγόρευση</h3><p>Πρακτικά από το μικρόφωνο, τον ήχο του υπολογιστή ή και τα δύο, με ώρα δίπλα σε κάθε φράση. Ένα <b>mini παράθυρο</b> γράφει ό,τι λέτε σε όποια εφαρμογή.</p></div>
+      <div class="tile" style="--c:#d0365a"><div class="ic"><svg width="30" height="30" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M140-160q-24 0-42-18.5T80-220v-520q0-23 18-41.5t42-18.5h281l60 60h339q23 0 41.5 18.5T880-680H455l-60-60H140v520l102-400h698L833-206q-6 24-22 35t-40 11H140Zm63-60h572l84-340H287l-84 340Zm0 0 84-340-84 340Zm-63-460v-60 60Z"/></svg></div><h3>Ανάγνωση</h3><p>Ανοίξτε ένα <b>PDF</b> ή ένα κείμενο και ακούστε το, με την ελληνική φωνή Meta MMS χωρίς internet ή με τις φωνές της Mistral και της OpenAI.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Δωρεάν, ή με κλειδί</h2>
+    <p class="sub">Την πρώτη φορά το VOICE ρωτά πώς θα δουλεύει. Αλλάζει όποτε θέλετε από τις Ρυθμίσεις.</p>
+    <div class="two">
+      <div class="panel">
+        <h3>Δωρεάν, σε αυτόν τον υπολογιστή</h3>
+        <p>Κατεβαίνουν <b>μία φορά</b> τα μοντέλα, ~940 MB: η αναγνώριση ομιλίας Whisper και η ελληνική φωνή. Μετά, τίποτα δεν χρειάζεται internet και ο ήχος δεν φεύγει ποτέ από τον υπολογιστή.</p>
+        <p>Αν κοπεί η σύνδεση, η λήψη συνεχίζει από εκεί που έμεινε, και κάθε αρχείο ελέγχεται πριν χρησιμοποιηθεί. Τα μοντέλα φυλάσσονται στο δικό μας <a href="https://github.com/kalotrapezis/voice-models">αποθετήριο μοντέλων</a>, για να μην αλλάξουν ποτέ οι σύνδεσμοι.</p>
+      </div>
+      <div class="panel">
+        <h3>Με κλειδί API</h3>
+        <p><b>Mistral</b> (Voxtral) ή <b>OpenAI</b>: πιο ακριβής αναγνώριση, χωρισμός ομιλητών, μετάφραση σε περισσότερες γλώσσες και γρήγορες ερωτήσεις.</p>
+        <p>Χρέωση ανά λεπτό: περίπου <b>0,18–0,21 $ την ώρα</b>. Η κάρτα του κλειδιού δείχνει πόσα λεπτά, tokens και χρήματα ξοδεύτηκαν τον μήνα. Το κλειδί μένει κρυπτογραφημένο μόνο στη συσκευή.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Δείτε το</h2>
+    <div class="cards-small">
+      <figure><img src="img/teleprompt.jpg" alt="" loading="lazy"><figcaption>Teleprompt με γρήγορες ερωτήσεις</figcaption></figure>
+      <figure><img src="img/welcome.jpg" alt="" loading="lazy"><figcaption>Η πρώτη φορά</figcaption></figure>
+      <figure><img src="img/models.jpg" alt="" loading="lazy"><figcaption>Τοπικά μοντέλα</figcaption></figure>
+      <figure><img src="img/meeting.jpg" alt="" loading="lazy"><figcaption>Σύσκεψη</figcaption></figure>
+      <figure><img src="img/dictation.jpg" alt="" loading="lazy"><figcaption>Υπαγόρευση</figcaption></figure>
+    </div>
+    <div class="island" role="tablist" aria-label="Οθόνες">
+      <button role="tab" id="tab-teleprompt" aria-controls="panel-teleprompt" aria-selected="true" tabindex="0">Teleprompt</button>
+      <button role="tab" id="tab-welcome" aria-controls="panel-welcome" aria-selected="false" tabindex="-1">Η πρώτη φορά</button>
+      <button role="tab" id="tab-models" aria-controls="panel-models" aria-selected="false" tabindex="-1">Τοπικά μοντέλα</button>
+      <button role="tab" id="tab-meeting" aria-controls="panel-meeting" aria-selected="false" tabindex="-1">Σύσκεψη</button>
+      <button role="tab" id="tab-dictation" aria-controls="panel-dictation" aria-selected="false" tabindex="-1">Υπαγόρευση</button>
+    </div>
+    <div role="tabpanel" id="panel-teleprompt" aria-labelledby="tab-teleprompt"><p>Μεγάλοι υπότιτλοι, ρυθμιστικά ταχύτητας και μεγέθους δεξιά, και κάτω οι γρήγορες ερωτήσεις με το μήνυμα του μαθητή. Στο κινητό όλα τα χειριστήρια πάνε κάτω.</p><img src="img/teleprompt.jpg" alt="Teleprompt" loading="lazy"></div>
+    <div role="tabpanel" id="panel-welcome" aria-labelledby="tab-welcome" hidden><p>Δωρεάν στον υπολογιστή, ή με κλειδί API. Μία επιλογή, μία φορά.</p><img src="img/welcome.jpg" alt="Η πρώτη φορά" loading="lazy"></div>
+    <div role="tabpanel" id="panel-models" aria-labelledby="tab-models" hidden><p>Λήψη με πρόοδο, συνέχεια αν κοπεί η σύνδεση, έλεγχος κάθε αρχείου. Δίπλα, ο μετρητής κόστους του κλειδιού.</p><img src="img/models.jpg" alt="Τοπικά μοντέλα" loading="lazy"></div>
+    <div role="tabpanel" id="panel-meeting" aria-labelledby="tab-meeting" hidden><p>Πρακτικά με ώρα δίπλα σε κάθε φράση, από μικρόφωνο, ήχο υπολογιστή ή και τα δύο. Αποθήκευση σε αρχείο.</p><img src="img/meeting.jpg" alt="Σύσκεψη" loading="lazy"></div>
+    <div role="tabpanel" id="panel-dictation" aria-labelledby="tab-dictation" hidden><p>Υπαγόρευση σε κείμενο που διορθώνετε, αντιγράφετε ή ακούτε· ή στο mini παράθυρο, κατευθείαν σε όποια εφαρμογή.</p><img src="img/dictation.jpg" alt="Υπαγόρευση" loading="lazy"></div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Αποκτήστε το VOICE</h2>
+    <div class="two">
+      <div class="panel">
+        <h3>Linux</h3>
+        <p>Το <b>.deb</b> εγκαθίσταται με διπλό κλικ σε Ubuntu, Mint, Debian. Το <b>AppImage</b> τρέχει παντού: δεξί κλικ → Ιδιότητες → «Να επιτρέπεται η εκτέλεση». Αν δεν ανοίγει: <code>sudo apt install libfuse2t64</code>.</p>
+        <a class="btn linux" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.AppImage"><img src="img/voice.png" alt=""><div><b>AppImage</b><span>199 MB</span></div></a>
+        <a class="btn deb" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/voice-desktop_0.1.0-beta.1_amd64.deb"><img src="img/voice.png" alt=""><div><b>.deb</b><span>155 MB</span></div></a>
+      </div>
+      <div class="panel">
+        <h3>Windows</h3>
+        <p>Windows 10 ή 11, 64-bit. Φορητό: δεν θέλει εγκατάσταση. Αν τα Windows προειδοποιήσουν: «Περισσότερες πληροφορίες» → «Εκτέλεση».</p>
+        <p>Στα Windows η αναγνώριση ομιλίας θέλει <b>κλειδί API</b>· η μετάφραση ελληνικά ↔ αγγλικά και η ελληνική φωνή δουλεύουν και χωρίς internet.</p>
+        <a class="btn win" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.exe"><img src="img/voice.png" alt=""><div><b>Windows .exe</b><span>175 MB</span></div></a>
+      </div>
+      <div class="panel">
+        <h3>Android</h3>
+        <p>Tablet και κινητό, Android 7 ή νεότερο. Η αναγνώριση γίνεται στη συσκευή· η μετάφραση ελληνικά ↔ αγγλικά είναι μέσα στο APK.</p>
+        <ul><li><b>13 και νεότερα:</b> όλα χωρίς internet· τα ελληνικά κατεβαίνουν από τις Ρυθμίσεις της εφαρμογής.</li>
+            <li><b>12:</b> όλα χωρίς internet· τα ελληνικά κατεβαίνουν από την εφαρμογή Google.</li>
+            <li><b>7–11:</b> η αναγνώριση θέλει την εφαρμογή Google και συνήθως internet.</li></ul>
+        <a class="btn android" href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.apk"><img src="img/voice.png" alt=""><div><b>APK</b><span>32 MB</span></div></a>
+      </div>
+    </div>
+
+    <div class="panel wide">
+      <h3>Τι χρειάζεται ο υπολογιστής (Linux)</h3>
+      <table>
+        <tr><th></th><td><b>Με κλειδί API</b></td><td><b>Τοπικά, χωρίς internet</b></td></tr>
+        <tr><th>Σύστημα</th><td colspan="2">Ubuntu 22.04, Linux Mint 21, Debian 12, Fedora 36 ή νεότερο, 64-bit</td></tr>
+        <tr><th>Επεξεργαστής</th><td>οποιοσδήποτε διπύρηνος</td><td><b>4 πυρήνες</b> τουλάχιστον· άνετα με <b>6–8</b> (Ryzen 5 / Core i5 από το 2018)</td></tr>
+        <tr><th>Μνήμη</th><td>4 GB</td><td><b>8 GB</b></td></tr>
+        <tr><th>Κάρτα γραφικών</th><td>δεν χρειάζεται</td><td>προαιρετική, αλλά κάνει την αναγνώριση <b>3–4 φορές πιο γρήγορη</b>: οποιαδήποτε με Vulkan, και ενσωματωμένη (AMD Radeon Vega και νεότερες, Intel UHD 620 / Iris Xe, NVIDIA GTX 900 και νεότερες), από Ubuntu 24.04 / Mint 22 και μετά</td></tr>
+        <tr><th>Δίσκος</th><td>~500 MB</td><td>~1,5 GB</td></tr>
+        <tr><th>Ταχύτητα</th><td>~1–3 s ανά φράση</td><td>~1,6 s για 15 s ομιλίας με την κάρτα γραφικών, ~5 s μόνο με τον επεξεργαστή (Ryzen 7 7730U)</td></tr>
+      </table>
+      <p style="margin-top:12px">Για την τάξη, ένα <b>μικρόφωνο πέτου</b> (Bluetooth ή ασύρματο) κάνει τη μεγαλύτερη διαφορά.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">Το VOICE μοιράζεται δωρεάν, σε δοκιμαστική έκδοση (beta). Τα μοντέλα έχουν τις δικές τους άδειες: Whisper (MIT), μετάφραση του Firefox (MPL 2.0), Meta MMS (CC BY-NC 4.0, μόνο μη εμπορική χρήση) · <a href="https://github.com/kalotrapezis/Voice/blob/main/THIRD-PARTY-NOTICES.md">άδειες και αναφορές</a> · κώδικας στο <a href="https://github.com/kalotrapezis/Voice">GitHub</a>.</div>
+</footer>
+<script>
+  // the screenshot tabs: click, arrow keys, and #name in the address keeps the chosen one
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  function show(tab, focus) {
+    tabs.forEach(t => { const on = t === tab; t.setAttribute('aria-selected', on); t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !on; });
+    if (focus) tab.focus();
+    history.replaceState(null, '', '#' + tab.id.slice(4));
+  }
+  tabs.forEach((t, i) => {
+    t.addEventListener('click', () => show(t));
+    t.addEventListener('keydown', e => {
+      const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+      if (d) { e.preventDefault(); show(tabs[(i + d + tabs.length) % tabs.length], true); }
+    });
+  });
+  const start = document.getElementById('tab-' + location.hash.slice(1));
+  if (start) show(start);
+</script>
+</body>
+</html>
