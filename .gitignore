@@ -22,3 +22,6 @@ __pycache__/
 # RPM build output
 build/
 llama.cpp/
+
+tts-venv/
+.tts-tmp/

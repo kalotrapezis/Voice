@@ -1,0 +1,117 @@
+{
+  "name": "voice-desktop",
+  "productName": "VOICE",
+  "version": "0.1.0-beta.1",
+  "description": "VOICE: υπαγόρευση, σύσκεψη και ανάγνωση με Mistral Voxtral",
+  "main": "main.js",
+  "author": "Theologos Kalotrapezis <kalotrapezis@gmail.com>",
+  "license": "SEE LICENSE IN ../LICENSE",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node ../web/test.js",
+    "copy-web": "node -e \"require('fs').cpSync('../web','web',{recursive:true})\"",
+    "dist:linux": "npm run copy-web && electron-builder --linux AppImage deb",
+    "dist:win": "npm run copy-web && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "44.4.3",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "gr.voice.desktop",
+    "productName": "VOICE",
+    "files": [
+      "main.js",
+      "preload.js",
+      "web/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "linux": {
+      "category": "Utility",
+      "icon": "build/icon.png",
+      "maintainer": "Theologos Kalotrapezis <kalotrapezis@gmail.com>",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v*/win32/**"
+      ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false,
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v*/linux/**"
+      ],
+      "extraResources": [
+        {
+          "from": "../models/bergamot",
+          "to": "models/bergamot",
+          "filter": [
+            "**/*"
+          ]
+        },
+        {
+          "from": "../THIRD-PARTY-NOTICES.md",
+          "to": "THIRD-PARTY-NOTICES.md"
+        },
+        {
+          "from": "../licenses",
+          "to": "licenses",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
+    },
+    "extraResources": [
+      {
+        "from": "whisper-bin",
+        "to": "whisper",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../models/bergamot",
+        "to": "models/bergamot",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../THIRD-PARTY-NOTICES.md",
+        "to": "THIRD-PARTY-NOTICES.md"
+      },
+      {
+        "from": "../licenses",
+        "to": "licenses",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**"
+    ],
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "pulseaudio-utils"
+      ]
+    }
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.24.3"
+  },
+  "homepage": "https://github.com/kalotrapezis/Voice"
+}
