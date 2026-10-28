@@ -1,3 +1,6 @@
+> [!WARNING]
+> **BETA: δεν έχει δοκιμαστεί ακόμα σε εκπαιδευτικό περιβάλλον.**
+
 <p align="center"><img src="Assets/VoiceIcon.png" width="120" alt="VOICE"></p>
 
 <h1 align="center">VOICE</h1>
