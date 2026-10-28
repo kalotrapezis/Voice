@@ -2,7 +2,7 @@
   "name": "voice-desktop",
   "productName": "VOICE",
   "version": "0.1.0-beta.1",
-  "description": "VOICE: υπαγόρευση, σύσκεψη και ανάγνωση με Mistral Voxtral",
+  "description": "Υπότιτλοι, μετάφραση και ανάγνωση στα ελληνικά, για την τάξη",
   "main": "main.js",
   "author": "Theologos Kalotrapezis <kalotrapezis@gmail.com>",
   "license": "SEE LICENSE IN ../LICENSE",
@@ -37,7 +37,9 @@
       "maintainer": "Theologos Kalotrapezis <kalotrapezis@gmail.com>",
       "files": [
         "!node_modules/onnxruntime-node/bin/napi-v*/win32/**"
-      ]
+      ],
+      "syncDesktopName": true,
+      "executableName": "voice-desktop"
     },
     "win": {
       "icon": "build/icon.png",
@@ -114,5 +116,6 @@
   "dependencies": {
     "onnxruntime-node": "^1.24.3"
   },
-  "homepage": "https://github.com/kalotrapezis/Voice"
+  "homepage": "https://github.com/kalotrapezis/Voice",
+  "desktopName": "voice-desktop.desktop"
 }
