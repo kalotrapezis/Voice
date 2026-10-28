@@ -71,7 +71,7 @@ def _pcm_id(pcm):
     """Short fingerprint of an audio segment, to spot duplicates in the log."""
     return f"{len(pcm)}B/{hashlib.md5(pcm).hexdigest()[:8]}"
 SVGS = os.path.join(HERE, "Assets", "SVGs")
-VERSION = "0.0.7~beta6"
+VERSION = "0.1.0~beta1"
 
 
 _DARK = None
@@ -442,6 +442,10 @@ class Transcriber:
                  _pcm_id(pcm))
         self.q.put((self.generation, pcm, lang, on_text))
 
+    def flush(self, fn):
+        """Call fn on the UI thread once everything queued so far is done."""
+        self.q.put((self.generation, None, None, fn))
+
     def cancel(self):
         """Invalidate queued and in-flight work (called when capture stops)."""
         with self._lock:
@@ -456,6 +460,9 @@ class Transcriber:
         while True:
             gen, pcm, lang, on_text = self.q.get()
             if gen != self.generation:                 # stopped since queued
+                continue
+            if pcm is None:                            # flush() marker
+                GLib.idle_add(on_text)
                 continue
             if len(pcm) < vk.FRAME_BYTES * vk.MIN_SPEECH:
                 continue
@@ -1256,6 +1263,7 @@ class MeetingPage(Gtk.Box):
         self.append(body)
 
         self.rec = Recorder()
+        self.recs = []
         self.transcriber = Transcriber()
         self.t0 = None
         self.lines = []
@@ -1290,16 +1298,26 @@ class MeetingPage(Gtk.Box):
         self.wave.queue_draw()
         return self.rec.running
 
+    # Fixed ~25 s chunks, not VAD phrases: the energy VAD needs speech at
+    # 2.5x the noise floor and missed a quiet lecture entirely, and longer
+    # chunks give the model context. Each cut lands on the quietest frame of
+    # the chunk's last 5 s so words are not split.
+    CHUNK = 25 * vk.SR * 2
+    CUT_WINDOW = 5 * vk.SR * 2
+
     def _on_record(self, btn):
         if self.rec.running:
-            self.rec.stop()
-            self.transcriber.cancel()
+            for i, r in enumerate(self.recs):
+                r.stop()
+                self._cut(i, final=True)
             self.rec_btn.set_child(svg_icon("mic-on-white", 24))
-            self._export()
+            # keep everything queued and export once it is transcribed
+            self.rec_btn.set_sensitive(False)
+            self.add_line(self._stamp(), "Ολοκλήρωση μεταγραφής…")
+            self.transcriber.flush(self._finish)
             return
-        st = self.win.settings()
-        dev = st.meeting_device()
-        if not dev:
+        sources = self.win.settings().meeting_sources()
+        if not sources:
             self.add_line("--:--:--", "Δεν βρέθηκε πηγή ήχου.")
             return
         while (c := self.transcript.get_first_child()):
@@ -1307,15 +1325,63 @@ class MeetingPage(Gtk.Box):
         self.lines = []
         self.t0 = time.monotonic()
         self.rec_btn.set_child(svg_icon("stop-white", 22))
-        self.rec.start(dev, on_segment=self._on_segment,
-                       on_level=self.levels.append, vad=True)
+        # self.rec drives the level meter and _tick; any extra source
+        # (the speakers, when both are on) gets a recorder of its own
+        self.recs = [self.rec] + [Recorder() for _ in sources[1:]]
+        self.whos = [who for _, who in sources]
+        self.offsets = [0] * len(sources)
+        for i, (r, (dev, who)) in enumerate(zip(self.recs, sources)):
+            # alongside the speakers, the mic only carries your own voice,
+            # loud and close: phrases catch it, and keep room noise (which
+            # the model turns into invented sentences) out
+            vad = len(sources) > 1 and i == 0
+            r.start(dev, on_segment=lambda pcm, w=who: self._phrase(pcm, w),
+                    on_level=self.levels.append if r is self.rec else None,
+                    vad=vad)
         GLib.timeout_add(200, self._tick)
+        GLib.timeout_add(1000, self._chunk_tick)
 
-    def _on_segment(self, pcm):
-        stamp = self._stamp()
+    def _chunk_tick(self):
+        if not self.rec.running:
+            return False
+        for i, r in enumerate(self.recs):
+            if len(r.buffer) >= self.CHUNK:
+                self._cut(i)
+        return True
+
+    def _cut(self, i, final=False):
+        buf, fb = self.recs[i].buffer, vk.FRAME_BYTES
+        n = len(buf) // fb * fb
+        if not final:
+            frames = range(self.CHUNK - self.CUT_WINDOW, self.CHUNK, fb)
+            n = min(frames, key=lambda o: vk.frame_rms(buf[o:o + fb]))
+        pcm = bytes(buf[:n])
+        del buf[:n]
+        start = self.offsets[i]
+        self.offsets[i] += n
+        # digital silence (a quiet monitor) only invites hallucinated text
+        if not pcm or max(vk.frame_rms(pcm[o:o + fb])
+                          for o in range(0, len(pcm), fb)) < 150:
+            return
+        self._submit(pcm, self.whos[i], start // (vk.SR * 2))
+
+    def _phrase(self, pcm, who):
+        sec = time.monotonic() - self.t0 - len(pcm) / (vk.SR * 2)
+        self._submit(pcm, who, int(max(0, sec)))
+
+    def _submit(self, pcm, who, sec):
+        stamp = f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+        prefix = f"{who}: " if who else ""
         self.transcriber.submit(
             pcm, self.win.settings().meet_lang(),
-            lambda txt, s=stamp: self.add_line(s, txt))
+            lambda txt: self.add_line(stamp, prefix + txt))
+
+    def _finish(self):
+        # two sources finish out of order; "[HH:MM:SS]" sorts as text
+        self.lines = sorted(l for l in self.lines
+                            if "Ολοκλήρωση μεταγραφής" not in l)
+        self._export()
+        self.rec_btn.set_sensitive(True)
 
     def _export(self):
         if not self.lines:
@@ -2155,6 +2221,34 @@ class SettingsPage(Gtk.Box):
             self.top_toggle, divider=False))
         body.append(group("Γενικά", "Γενική συμπεριφορά της εφαρμογής", gen))
 
+        # Αναγνώριση ομιλίας (engine for dictation, meeting and notepad mic)
+        eng = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.engines = ["whisper", "mistral", "openai"]
+        self.engine_drop = dropdown(["Τοπικό (whisper)",
+                                     "Mistral Voxtral (internet)",
+                                     "OpenAI (internet)"])
+        eng.append(settings_row(
+            "Μηχανή", "Τα cloud είναι πολύ πιο ακριβή· χωρίς internet "
+            "γυρίζουν μόνα τους στο τοπικό", self.engine_drop))
+        self.key_status = dim(Gtk.Label(label="", xalign=0, wrap=True))
+        # each service has its own key from its own console
+        for name, title, where in (
+                ("mistral", "Κλειδί Mistral", "Από το console.mistral.ai → API Keys"),
+                ("openai", "Κλειδί OpenAI", "Από το platform.openai.com → API keys")):
+            entry = Gtk.PasswordEntry(show_peek_icon=True, hexpand=True,
+                                      placeholder_text="API key")
+            entry.set_text(vk.cloud_key(name))
+            entry.connect("activate", self._save_key, name)
+            key_btn = Gtk.Button(label="Αποθήκευση")
+            key_btn.connect("clicked", lambda _b, e=entry, n=name: self._save_key(e, n))
+            eng.append(settings_row(title, where, [entry, key_btn],
+                                    divider=name == "mistral"))
+        ks = Gtk.Box(margin_start=14, margin_end=12, margin_bottom=10)
+        ks.append(self.key_status)
+        eng.append(ks)
+        body.append(group("☁  Αναγνώριση ομιλίας",
+                          "Ποιος μετατρέπει τη φωνή σε κείμενο", eng))
+
         # Υπαγόρευση
         dic = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         dic.append(settings_row("Στόχος (πού πάει το κείμενο)", None,
@@ -2287,8 +2381,12 @@ class SettingsPage(Gtk.Box):
 
         # Σύσκεψη
         mt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.meet_src_drop = dropdown(["Ήχος συστήματος", "Μικρόφωνο"])
-        mt.append(settings_row("Πηγή ήχου", None, self.meet_src_drop))
+        self.meet_src_drop = dropdown(["Ήχος συστήματος", "Μικρόφωνο",
+                                       "Μικρόφωνο + ηχεία"])
+        mt.append(settings_row(
+            "Πηγή ήχου", "Με «Μικρόφωνο + ηχεία» φόρεσε ακουστικά, αλλιώς "
+            "το μικρόφωνο ξαναπιάνει τα ηχεία και γράφεται διπλό",
+            self.meet_src_drop))
         self.meet_lang_drop = dropdown(list(LANGS.keys()))
         mt.append(settings_row("Γλώσσα", None, self.meet_lang_drop))
         exp_btn = Gtk.Button(label="Επιλογή…")
@@ -2387,13 +2485,16 @@ class SettingsPage(Gtk.Box):
             list(LANGS.values()))
         sel(self.voice_drop, cfg.get("VOICE", ""), list(ra.VOICES.keys()))
         self.meet_src_drop.set_selected(int(cfg.get("MEET_SRC", "0") or 0))
+        eng_name = cfg.get("STT_ENGINE", "whisper")
+        self.engine_drop.set_selected(
+            self.engines.index(eng_name) if eng_name in self.engines else 0)
         # the switch on the dictation card is the single source of truth —
         # the settings one was a mockup leftover wired to nothing
         self.cont_toggle.set_active(cfg.get("CONT", "0") == "1")
         self.cont_toggle.bind_property(
             "active", self.win.pages["dictation"].mode_toggle, "active",
             GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
-        self._stt_key = cfg.get("STT_MODEL", "small")
+        self._stt_key = cfg.get("STT_MODEL", "medium")
         if self._stt_key not in self.stt_keys:
             self._stt_key = "small"
         self.stt_drop.set_selected(self.stt_keys.index(self._stt_key))
@@ -2421,7 +2522,7 @@ class SettingsPage(Gtk.Box):
         self.voice_drop.connect("notify::selected",
                                 lambda *_: self._voice_changed())
         for d in (self.lang_drop, self.meet_lang_drop, self.voice_drop,
-                  self.meet_src_drop, self.mic_drop):
+                  self.meet_src_drop, self.mic_drop, self.engine_drop):
             d.connect("notify::selected", lambda *_: self._persist())
         self.speed_scale.connect("value-changed",
                                  lambda *_: self._persist())
@@ -2450,12 +2551,37 @@ class SettingsPage(Gtk.Box):
             LANG=self.dict_lang(), MEET_LANG=self.meet_lang(),
             VOICE=list(ra.VOICES.keys())[self.voice_drop.get_selected()],
             MEET_SRC=str(self.meet_src_drop.get_selected()),
+            STT_ENGINE=self.engines[self.engine_drop.get_selected()],
             SPEED=f"{self.speed_scale.get_value():.2f}",
             DEVICE=self.mic_device() or "",
         )
         for key, sw in self.feature_toggles.items():
             cfg[f"FEAT_{key.upper()}"] = "1" if sw.get_active() else "0"
         vk.save_config(cfg)
+
+    def _save_key(self, entry, name):
+        key = entry.get_text().strip()
+        vk.save_cloud_key(name, key)
+        if not key:
+            self.key_status.set_label("Το κλειδί σβήστηκε.")
+            return
+        self.key_status.set_label("Έλεγχος κλειδιού…")
+        threading.Thread(target=self._check_key, args=(key, name),
+                         daemon=True).start()
+
+    def _check_key(self, key, name):
+        # a 1 s silent wav is the cheapest real call that proves key + credit
+        fd, wav = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            vk.write_wav(wav, b"\0\0" * vk.SR)
+            vk.cloud_transcribe(wav, "el", key, name)
+            msg = "✅ Το κλειδί δουλεύει."
+        except Exception as e:
+            msg = f"⛔ Το κλειδί δεν δούλεψε: {e}"
+        finally:
+            os.remove(wav)
+        GLib.idle_add(self.key_status.set_label, msg)
 
     # ---- speech model (download + RAM gating)
     def _stt_describe(self):
@@ -2625,10 +2751,17 @@ class SettingsPage(Gtk.Box):
                 return name
         return None
 
-    def meeting_device(self):
-        if self.meet_src_drop.get_selected() == 0:      # system audio
-            return vk.default_sink_monitor() or None
-        return self.mic_device()
+    def meeting_sources(self):
+        """[(pulse source, speaker label)] to capture. With both, each side
+        gets its own recorder, so the label says who spoke without guessing."""
+        speakers = vk.default_sink_monitor()
+        mic = self.mic_device() or "@DEFAULT_SOURCE@"
+        choice = self.meet_src_drop.get_selected()
+        if choice == 0:
+            return [(speakers, "")] if speakers else []
+        if choice == 1:
+            return [(mic, "")]
+        return [(mic, "Εγώ")] + ([(speakers, "Ηχεία")] if speakers else [])
 
     def dict_lang(self):
         return list(LANGS.values())[self.lang_drop.get_selected()]

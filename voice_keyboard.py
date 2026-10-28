@@ -15,6 +15,7 @@ desktops, chosen at runtime. Pure standard-library Tkinter — no pip deps.
 import os
 import re
 import sys
+import json
 import time
 import math
 import wave
@@ -40,7 +41,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ICON = os.path.join(HERE, "Assets", "VoiceIcon.png")
 MODELS_DIR = asset_dir("models")
 MODEL = os.environ.get("WHISPER_MODEL") or os.path.join(MODELS_DIR, "ggml-small.bin")
-WHISPER = os.path.join(HERE, "whisper.cpp", "build", "bin", "whisper-cli")
+# the Vulkan build (GPU) when present: the encoder runs ~2.7× faster on the laptop's Radeon
+WHISPER = next((p for p in (os.path.join(HERE, "whisper.cpp", b, "bin", "whisper-cli")
+                            for b in ("build-vulkan", "build")) if os.path.exists(p)),
+               os.path.join(HERE, "whisper.cpp", "build", "bin", "whisper-cli"))
 
 # first-run downloads (lean package: models fetched once into voice_data_dir)
 WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
@@ -137,7 +141,74 @@ def meeting_dir():
     return os.path.expanduser(d)
 
 
+# cloud speech-to-text: same multipart API, each with its own key (~/.config/voicekbd/<name>_key)
+CLOUD = {
+    # voxtral mini benchmarked as good as small, cheaper
+    "mistral": ("https://api.mistral.ai/v1/audio/transcriptions", "voxtral-mini-transcribe-3"),
+    "openai": ("https://api.openai.com/v1/audio/transcriptions", "gpt-4o-mini-transcribe"),
+}
+# spelling hints for course vocabulary the model would otherwise transliterate
+MISTRAL_TERMS = ["jamovi", "SPSS", "t-test", "ANOVA", "Likert", "Levene",
+                 "Shapiro-Wilk", "p-value", "Cronbach's alpha"]
+
+
+def cloud_key_path(name):
+    return os.path.join(CONFIG_DIR, f"{name}_key")
+
+
+def cloud_key(name):
+    try:
+        with open(cloud_key_path(name)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_cloud_key(name, key):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    fd = os.open(cloud_key_path(name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(key.strip())
+
+
+def cloud_transcribe(path, lang, key, name="mistral"):
+    """POST a wav to Voxtral / OpenAI and return its text. Raises on any failure."""
+    url, model = CLOUD[name]
+    boundary = "voice" + os.urandom(8).hex()
+    fields = [("model", model)]
+    # OpenAI takes the spelling hints as a free-text prompt
+    fields += ([("prompt", ", ".join(MISTRAL_TERMS))] if name == "openai"
+               else [("context_bias", t) for t in MISTRAL_TERMS])
+    if lang in ("el", "en"):
+        fields.append(("language", lang))
+    body = b"".join(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'
+        .encode() for k, v in fields)
+    with open(path, "rb") as f:
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                 f'filename="a.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
+        body += f.read() + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r).get("text", "").strip()
+
+
 def transcribe(path, lang):
+    """Speech → text: Mistral/OpenAI when chosen in settings and its key is saved,
+    otherwise (or when the network/API fails) local whisper.cpp."""
+    name = load_config().get("STT_ENGINE")
+    key = cloud_key(name) if name in CLOUD else ""
+    if key:
+        try:
+            return cloud_transcribe(path, lang, key, name)
+        except Exception as e:
+            print(f"{name} failed, falling back to whisper:", e, file=sys.stderr)
+    return whisper_transcribe(path, lang)
+
+
+def whisper_transcribe(path, lang):
     """Run whisper.cpp on a wav file and return cleaned text ('' on failure).
 
     whisper saturates every core; at normal priority it can starve ydotool
@@ -362,11 +433,11 @@ def ram_check(label, need, dl_gb=0.0):
 
 
 def whisper_model():
-    """Path of the selected model, falling back to small if it isn't there."""
+    """Path of the selected model (medium by default), falling back to small if it isn't there."""
     env = os.environ.get("WHISPER_MODEL")
     if env:
         return env
-    key = load_config().get("STT_MODEL", "small")
+    key = load_config().get("STT_MODEL", "medium")
     if key != "small" and (not model_installed(key)
                            or model_ram_check(key)[0] == "block"):
         key = "small"

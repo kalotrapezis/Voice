@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="el">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>VOICE</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="rail island" aria-label="Σελίδες">
+      <div class="brand"><img src="icon.png" alt="">VOICE</div>
+      <button class="nav-item" data-page="dictate"><span data-icon="mic"></span><span>Υπαγόρευση</span></button>
+      <button class="nav-item" data-page="meeting"><span data-icon="meeting"></span><span>Σύσκεψη</span></button>
+      <button class="nav-item" data-page="prompt"><span data-icon="prompt"></span><span>Teleprompt</span></button>
+      <button class="nav-item" data-page="read"><span data-icon="speaker"></span><span>Ανάγνωση</span></button>
+      <button class="nav-item foot" data-page="settings"><span data-icon="settings"></span><span>Ρυθμίσεις</span></button>
+    </nav>
+
+    <main class="content">
+      <!-- Υπαγόρευση -->
+      <section class="page" id="dictate">
+        <h1>Υπαγόρευση</h1>
+        <div class="recorder island">
+          <button class="rec" data-mode="dictate" aria-label="Έναρξη ηχογράφησης"></button>
+          <button class="round mini-only" id="pauseBtn" aria-label="Παύση"><span data-icon="pause"></span></button>
+          <div class="rec-info">
+            <div class="timer">00:00:00</div>
+            <div class="level"><i></i></div>
+            <div class="status">Πάτησε το μικρόφωνο και μίλα. Ξαναπάτησε όταν τελειώσεις.</div>
+          </div>
+          <button class="round mini-only" id="expandBtn" aria-label="Μεγάλο παράθυρο"><span data-icon="fullscreen"></span></button>
+        </div>
+        <textarea id="dictText" class="island text" placeholder="Εδώ εμφανίζεται ό,τι λες. Μπορείς να το διορθώσεις, να το αντιγράψεις ή να το ακούσεις."></textarea>
+        <div class="actions">
+          <button class="pill-button primary" id="dictCopy"><span data-icon="copy"></span>Αντιγραφή</button>
+          <button class="pill-button" id="dictRead"><span data-icon="speaker"></span>Ανάγνωση</button>
+          <button class="pill-button" id="dictClear"><span data-icon="clear"></span>Καθαρισμός</button>
+          <button class="pill-button" id="miniBtn" hidden><span data-icon="mic"></span>Mini παράθυρο</button>
+        </div>
+        <p class="hint" id="miniHint" hidden>Mini παράθυρο: μικρή μπάρα πάντα μπροστά. Ό,τι λες γράφεται εκεί που είναι ο κέρσορας, σε όποια εφαρμογή (Ctrl+V μετά από κάθε παύση).</p>
+      </section>
+
+      <!-- Σύσκεψη -->
+      <section class="page" id="meeting">
+        <h1>Σύσκεψη</h1>
+        <div class="recorder island">
+          <button class="rec" data-mode="meeting" aria-label="Έναρξη ηχογράφησης"></button>
+          <div class="rec-info">
+            <div class="timer">00:00:00</div>
+            <div class="level"><i></i></div>
+            <div class="status">Ηχογράφησε τη συζήτηση· η μεταγραφή γράφεται καθώς μιλάτε.</div>
+          </div>
+          <div class="segmented" id="sourcePick" role="radiogroup" aria-label="Πηγή ήχου">
+            <button data-v="mic">Μικρόφωνο</button>
+            <button data-v="system">Ήχος υπολογιστή</button>
+            <button data-v="both">Και τα δύο</button>
+          </div>
+        </div>
+        <div class="island transcript" id="transcript" aria-live="polite">
+          <p class="empty-hint">Η μεταγραφή εμφανίζεται εδώ, με ώρα και ομιλητή.</p>
+        </div>
+        <div class="actions">
+          <button class="pill-button primary" id="meetCopy"><span data-icon="copy"></span>Αντιγραφή</button>
+          <button class="pill-button" id="meetSave"><span data-icon="save"></span>Αποθήκευση</button>
+          <button class="pill-button" id="meetClear"><span data-icon="clear"></span>Καθαρισμός</button>
+        </div>
+      </section>
+
+      <!-- Teleprompt: live captions to read from across the room, and a box for the pupil to answer -->
+      <section class="page" id="prompt">
+        <div class="prompt-bar island">
+          <button class="rec pill" data-mode="prompt" data-label="Μεταγραφή" aria-label="Έναρξη υποτίτλων"></button>
+          <select id="promptSource" class="pick" aria-label="Πηγή ήχου">
+            <option value="mic">Μικρόφωνο</option>
+            <option value="system">Ήχος υπολογιστή</option>
+            <option value="both">Μικρόφωνο + ηχεία</option>
+          </select>
+          <button class="pill-button" id="translateBtn" aria-pressed="false">Μετάφραση</button>
+          <div class="rec-info">
+            <div class="level"><i></i></div>
+            <div class="status">Πάτησε «Μεταγραφή» για υπότιτλους.</div>
+            <span class="timer" hidden></span>
+          </div>
+          <button class="round" id="contrastBtn" aria-label="Σκούρο ή φωτεινό φόντο"><span data-icon="contrast"></span></button>
+          <button class="round" id="fullBtn" aria-label="Πλήρης οθόνη"><span data-icon="fullscreen"></span></button>
+          <button class="round" id="promptClear" aria-label="Καθαρισμός"><span data-icon="clear"></span></button>
+        </div>
+        <div class="prompt-side island">
+          <label class="vslider" title="Ταχύτητα κύλισης"><span data-icon="speed" aria-hidden="true"></span><input type="range" class="speedRange" min="1" max="10" step="1" aria-label="Ταχύτητα κύλισης"></label>
+          <label class="vslider" title="Μέγεθος γραμμάτων"><svg class="aa" width="26" height="22" viewBox="0 0 26 22" aria-hidden="true"><text x="0" y="20" font-size="10" font-weight="700" fill="currentColor">A</text><text x="9" y="20" font-size="19" font-weight="700" fill="currentColor">A</text></svg><input type="range" class="sizeRange" min="24" max="160" step="4" aria-label="Μέγεθος γραμμάτων"></label>
+        </div>
+        <div class="prompt-view dark" id="promptView" tabindex="0" aria-live="polite">
+          <div id="promptText"></div>
+          <button class="pill-button primary live" id="liveBtn" hidden>↓ Ζωντανά</button>
+        </div>
+        <div class="prompt-msg island">
+          <div class="suggest" id="suggest" hidden></div>
+          <textarea id="msgText" rows="2" placeholder="Μήνυμα στον δάσκαλο…" aria-label="Μήνυμα στον δάσκαλο"></textarea>
+          <button class="round" id="swapBtn" aria-label="Αλλαγή θέσης: μήνυμα πάνω ή κάτω"><span data-icon="swap"></span></button>
+          <button class="round big" id="msgSpeak" aria-label="Εκφώνηση του μηνύματος"><span data-icon="speaker"></span></button>
+        </div>
+      </section>
+
+      <!-- Ανάγνωση -->
+      <section class="page" id="read">
+        <h1>Ανάγνωση</h1>
+        <textarea id="readText" class="island text" placeholder="Γράψε ή επικόλλησε κείμενο για να διαβαστεί φωναχτά."></textarea>
+        <div class="actions">
+          <button class="pill-button primary" id="speakBtn"><span data-icon="play"></span><span>Ανάγνωση</span></button>
+          <button class="pill-button" id="openFile"><span data-icon="open"></span>Άνοιγμα αρχείου</button>
+          <input type="file" id="fileInput" accept=".pdf,.txt,.md,application/pdf,text/plain" hidden>
+          <div class="segmented island" id="ratePick" role="radiogroup" aria-label="Ταχύτητα">
+            <button data-v="0.8">Αργά</button>
+            <button data-v="1">Κανονικά</button>
+            <button data-v="1.25">Γρήγορα</button>
+          </div>
+        </div>
+        <p class="hint" id="ttsInfo"></p>
+      </section>
+
+      <!-- Ρυθμίσεις -->
+      <section class="page" id="settings">
+        <h1>Ρυθμίσεις</h1>
+        <h2 class="group">Ήχος</h2>
+        <div class="settings-card island" id="inputCard">
+          <h2><span data-icon="mic"></span>Είσοδος ήχου</h2>
+          <div class="segmented" id="inputPick" role="radiogroup" aria-label="Είσοδος ήχου"></div>
+          <p class="hint">Για όλες τις σελίδες. «Ήχος υπολογιστή»: ό,τι παίζει στα ηχεία (YouTube, βιντεοκλήση). «Και τα δύο»: φόρεσε ακουστικά, αλλιώς το μικρόφωνο ξανακούει τα ηχεία.</p>
+        </div>
+        <div class="settings-card island">
+          <h2>Γλώσσα ομιλίας</h2>
+          <div class="segmented" id="langPick" role="radiogroup" aria-label="Γλώσσα ομιλίας"></div>
+          <p class="hint">Η γλώσσα που μιλιέται. Για αγγλικό βίντεο διάλεξε «English» και μετάφραση σε «Greek».</p>
+        </div>
+
+        <h2 class="group" id="modelsGroup">Τοπικά μοντέλα</h2>
+        <div class="settings-card island" id="modelsCard">
+          <h2><span data-icon="save"></span>Δωρεάν, χωρίς internet<button class="pill-button primary" id="downloadAll" style="margin-left:auto">Λήψη όλων</button></h2>
+          <p class="hint">Κατεβαίνουν μία φορά από τη σελίδα του VOICE στο GitHub. Αν κοπεί η σύνδεση, η λήψη συνεχίζει από εκεί που έμεινε, και κάθε αρχείο ελέγχεται πριν χρησιμοποιηθεί. Η μετάφραση ελληνικά ↔ αγγλικά είναι ήδη μέσα στην εφαρμογή.</p>
+          <div id="modelList"></div>
+        </div>
+
+        <h2 class="group">Αναγνώριση ομιλίας</h2>
+        <div class="settings-card island" id="engineCard">
+          <h2><span data-icon="settings"></span>Μηχανή και μοντέλο</h2>
+          <div class="segmented" id="providerPick" role="radiogroup" aria-label="Μηχανή"></div>
+          <div class="segmented" id="modelPick" role="radiogroup" aria-label="Μοντέλο"></div>
+          <p class="hint" id="engineHint"></p>
+          <p class="hint" id="recogInfo"></p>
+          <div class="actions"><button class="pill-button" id="greekDownload" hidden>Λήψη ελληνικών για χρήση χωρίς internet</button></div>
+        </div>
+        <div class="settings-card island" id="keyCard">
+          <h2><span data-icon="key"></span><span id="keyTitle">Κλειδί API</span><span class="usage" id="usage"></span></h2>
+          <p class="hint" id="keyWhere"></p>
+          <input id="keyField" class="field" type="password" autocomplete="off" spellcheck="false">
+          <div class="actions">
+            <button class="pill-button primary" id="keySave">Αποθήκευση</button>
+            <button class="pill-button" id="keyCheck">Έλεγχος κλειδιού</button>
+          </div>
+          <p class="hint" id="keyStatus"></p>
+        </div>
+        <div class="settings-card island">
+          <h2>Λέξεις που πρέπει να γράφει σωστά</h2>
+          <p class="hint">Ειδικοί όροι ή ονόματα, χωρισμένα με κόμμα (μόνο Mistral και OpenAI).</p>
+          <input id="termsField" class="field" spellcheck="false">
+        </div>
+
+        <h2 class="group">Ανάγνωση</h2>
+        <div class="settings-card island">
+          <h2><span data-icon="speaker"></span>Φωνή ανάγνωσης</h2>
+          <div class="segmented" id="ttsPick" role="radiogroup" aria-label="Φωνή ανάγνωσης"></div>
+          <label class="slider wide" id="ttsVoiceRow"><span>Φωνή</span><select id="ttsVoice" class="pick"></select><output></output></label>
+          <p class="hint" id="ttsHint"></p>
+        </div>
+
+        <h2 class="group">Teleprompt</h2>
+        <div class="settings-card island">
+          <label class="slider wide"><span>Μέγεθος γραμμάτων</span><input type="range" class="sizeRange" min="24" max="160" step="4"><output class="sizeOut"></output></label>
+          <label class="slider wide"><span>Ταχύτητα κύλισης</span><input type="range" class="speedRange" min="1" max="10" step="1"><output class="speedOut"></output></label>
+          <p class="hint">Για μαθητή που διαβάζει από περίπου 1 μέτρο: μεγάλα γράμματα και αργή κύλιση. Στην οθόνη του Teleprompt μεγεθύνεις και με δύο δάχτυλα.</p>
+          <label class="check"><input type="checkbox" id="suggestBox"> Γρήγορες ερωτήσεις: 3 έτοιμες ερωτήσεις από το μάθημα, για να ρωτά ο μαθητής με ένα άγγιγμα</label>
+          <p class="hint">Τις φτιάχνει η Mistral ή η OpenAI από τους υπότιτλους, κάθε ~20 δευτερόλεπτα (θέλει internet και κλειδί, ≈ $0,0001 τη φορά).</p>
+          <label class="slider wide"><span>Μετάφραση σε</span><select id="trLang" class="pick"></select><output></output></label>
+          <p class="hint">Με το κουμπί «Μετάφραση» γράφεται μόνο η μετάφραση. Με Mistral ο ήχος μεταφράζεται κατευθείαν (μία κλήση, ~3 δευτερόλεπτα). Χωρίς internet, στον υπολογιστή, μεταφράζει το τοπικό NLLB σε όλες τις γλώσσες της λίστας (~1 δευτερόλεπτο ανά φράση).</p>
+        </div>
+
+        <h2 class="group">Σύσκεψη</h2>
+        <div class="settings-card island">
+          <label class="check"><input type="checkbox" id="diarizeBox"> Αναγνώριση ομιλητών στο τέλος (Ομιλητής 1, 2…), μόνο με Mistral</label>
+          <p class="hint">Όταν σταματήσεις, όλη η ηχογράφηση ξαναστέλνεται μία φορά για να χωριστούν οι ομιλητές. Με «Και τα δύο» οι ετικέτες είναι «Εγώ» και «Ηχεία».</p>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <div class="welcome" id="welcome" hidden>
+    <div class="island welcome-card">
+      <img src="icon.png" alt="" width="72" height="72">
+      <h1>Καλώς ήρθατε στο VOICE</h1>
+      <p>Πώς θα δουλεύει η αναγνώριση και η ανάγνωση;</p>
+      <button class="pill-button primary" id="welcomeLocal"><span>Δωρεάν, σε αυτόν τον υπολογιστή<br><small>λήψη <span id="welcomeSize"></span> μία φορά, μετά χωρίς internet</small></span></button>
+      <button class="pill-button" id="welcomeKey"><span>Έχω κλειδί API (Mistral ή OpenAI)<br><small>πιο ακριβές, με internet, χρέωση ανά λεπτό</small></span></button>
+      <p class="hint">Μπορείτε να το αλλάξετε όποτε θέλετε στις Ρυθμίσεις.</p>
+    </div>
+  </div>
+  <script src="icons.js"></script>
+  <script src="voxtral.js"></script>
+  <script src="local.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
