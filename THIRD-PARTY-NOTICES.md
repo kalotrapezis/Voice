@@ -27,6 +27,8 @@ Languages*, 2023, [arXiv:2305.13516](https://arxiv.org/abs/2305.13516).
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) (τρέχει τη φωνή MMS) | MIT ([`licenses/onnxruntime-MIT.txt`](licenses/onnxruntime-MIT.txt)) |
 | [pdf.js](https://github.com/mozilla/pdf.js) (ανοίγει τα PDF) | Apache 2.0 ([`licenses/pdf.js-Apache-2.0.txt`](licenses/pdf.js-Apache-2.0.txt)) |
 | [Electron](https://www.electronjs.org/) | MIT (μέσα στο πακέτο, `LICENSE.electron.txt` και `LICENSES.chromium.html`) |
+| whisper.cpp για Windows, η [επίσημη έκδοση](https://github.com/ggml-org/whisper.cpp/releases) `b5454` | MIT ([`licenses/whisper.cpp-MIT.txt`](licenses/whisper.cpp-MIT.txt)) |
+| Microsoft Visual C++ Runtime (`msvcp140*.dll`, `vcruntime140*.dll`, μόνο στο πακέτο Windows) | αρχεία που η Microsoft επιτρέπει να διανέμονται μαζί με εφαρμογές (Visual Studio 2022, «Distributable Code»), από τον επίσημο `vc_redist.x64.exe` |
 | Εικονίδια [Material Symbols](https://fonts.google.com/icons) | Apache 2.0 |
 
 Υπηρεσίες cloud (Mistral, OpenAI) χρησιμοποιούνται μόνο αν βάλετε δικό σας κλειδί, με τους όρους της κάθε υπηρεσίας.

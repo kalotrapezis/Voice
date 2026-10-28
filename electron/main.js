@@ -48,8 +48,10 @@ ipcMain.handle('tts:synth', (_e, text, rate) => new Promise((resolve, reject) =>
 // packaged: the portable build (tools/build-whisper-portable.sh) in resources/whisper
 const WBIN = app.isPackaged ? [path.join(process.resourcesPath, 'whisper')]
   : ['build-vulkan', 'build'].map(b => path.join(ROOT, 'whisper.cpp', b, 'bin')).concat(path.join(__dirname, 'whisper-bin'));
-const WHISPER = process.env.VOICE_WHISPER || WBIN.map(d => path.join(d, 'whisper-cli')).find(p => fs.existsSync(p));
-const WSERVER = WBIN.map(d => path.join(d, 'whisper-server')).find(p => fs.existsSync(p));
+// Windows: whisper.cpp's own release build (CPU), see tools/fetch-whisper-windows.sh
+const EXE = process.platform === 'win32' ? '.exe' : '';
+const WHISPER = process.env.VOICE_WHISPER || WBIN.map(d => path.join(d, 'whisper-cli' + EXE)).find(p => fs.existsSync(p));
+const WSERVER = WBIN.map(d => path.join(d, 'whisper-server' + EXE)).find(p => fs.existsSync(p));
 // the GTK app's model files (it downloads them); same folders it uses
 // q8_0 first: the same text as the full model, ~20% faster on this CPU (whisper-quantize makes it)
 const WFILES = { small: ['ggml-small-q8_0.bin', 'ggml-small.bin'], medium: ['ggml-medium-q8_0.bin', 'ggml-medium.bin'], large: ['ggml-large-v3-q5_0.bin'] };

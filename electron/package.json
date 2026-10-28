@@ -49,6 +49,13 @@
       ],
       "extraResources": [
         {
+          "from": "whisper-win",
+          "to": "whisper",
+          "filter": [
+            "**/*"
+          ]
+        },
+        {
           "from": "../models/bergamot",
           "to": "models/bergamot",
           "filter": [
@@ -64,6 +71,15 @@
           "to": "licenses",
           "filter": [
             "**/*"
+          ]
+        }
+      ],
+      "extraFiles": [
+        {
+          "from": "vcruntime",
+          "to": ".",
+          "filter": [
+            "*.dll"
           ]
         }
       ]
