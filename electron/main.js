@@ -124,6 +124,7 @@ const runCli = (m, wavBytes, translate, lang) => new Promise((resolve, reject) =
 // ---- offline models: downloaded into userData/models (the download manager below); a source checkout's
 // ../models and the GTK app's folder count too, so nothing is fetched twice on a developer machine ----
 const { MODEL_URL, MODEL_PACKS } = require(path.join(WEB, 'voxtral.js'));
+const { fetchResumable } = require('./download.js');
 const MODELS_HOME = path.join(app.getPath('userData'), 'models');
 const MODEL_DIRS = [MODELS_HOME, path.join(process.resourcesPath || '', 'models'), path.join(ROOT, 'models'),
   path.join(os.homedir(), '.local', 'share', 'voice', 'models')];
@@ -166,35 +167,6 @@ ipcMain.handle('models:remove', (_e, id) => {
   for (const f of pack ? pack.files : []) fs.rmSync(path.join(MODELS_HOME, f.path), { force: true });
   if (id === 'voice') mmsSession = null;
 });
-
-/** Download to dest.part, picking up where an earlier try stopped; sha256-check before it becomes dest. */
-async function fetchResumable(url, dest, f, signal, onBytes) {
-  const part = dest + '.part', crypto = require('crypto');
-  let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
-  if (have > f.size) { fs.rmSync(part); have = 0; }
-  const hash = crypto.createHash('sha256');
-  if (have) { hash.update(fs.readFileSync(part)); onBytes(have); }
-  if (have < f.size) {
-    const r = await fetch(url, { signal, headers: have ? { Range: `bytes=${have}-` } : {} });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    if (have && r.status !== 206) { // the server ignored Range: start over
-      fs.rmSync(part); onBytes(-have);
-      return fetchResumable(url, dest, f, signal, onBytes);
-    }
-    const out = fs.createWriteStream(part, { flags: 'a' });
-    try {
-      for await (const chunk of r.body) {
-        hash.update(chunk);
-        if (!out.write(chunk)) await new Promise(ok => out.once('drain', ok));
-        onBytes(chunk.length);
-      }
-    } finally {
-      await new Promise(ok => out.end(ok));
-    }
-  }
-  if (hash.digest('hex') !== f.sha256) { fs.rmSync(part, { force: true }); throw new Error('το αρχείο ήρθε χαλασμένο, ξαναδοκίμασε'); }
-  fs.renameSync(part, dest);
-}
 
 // ---- Greek voice: Meta MMS (VITS → ONNX), native onnxruntime, ~0.4 s a sentence ----
 let mmsSession = null;

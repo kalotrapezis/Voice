@@ -23,6 +23,7 @@
     "productName": "VOICE",
     "files": [
       "main.js",
+      "download.js",
       "preload.js",
       "web/**",
       "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**"
