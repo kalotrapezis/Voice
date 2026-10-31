@@ -99,6 +99,7 @@
       "node_modules/onnxruntime-node/**"
     ],
     "deb": {
+      "fpm": ["--conflicts", "voice", "--replaces", "voice"],
       "depends": [
         "libgtk-3-0",
         "libnotify4",
