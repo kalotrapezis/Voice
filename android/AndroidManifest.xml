@@ -8,6 +8,13 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- WebView (WebRTC) needs this to open the microphone -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- «Μικρόφωνο PC»: keeps sending to the computer with the screen off (MicService), scans its QR code -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- Android 11+ hides TTS and speech-recognition engines from apps unless they declare these -->
     <queries>
@@ -19,8 +26,10 @@
         </intent>
     </queries>
 
+    <!-- usesCleartextTraffic: «Μικρόφωνο PC» posts to the desktop's plain-HTTP port on the local Wi-Fi -->
     <application
         android:label="VOICE"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:theme="@style/AppTheme">
@@ -34,5 +43,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name=".MicService" android:exported="false" android:foregroundServiceType="microphone" />
     </application>
 </manifest>

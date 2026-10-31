@@ -13,14 +13,14 @@
 
 ## Λήψη
 
-**0.1.0 Beta 1** ([τι νέο υπάρχει](https://github.com/kalotrapezis/Voice/releases/tag/v0.1.0-beta.1)). Είναι beta:
+**0.1.0 Beta 3** ([τι νέο υπάρχει](https://github.com/kalotrapezis/Voice/releases/tag/v0.1.0-beta.3)). Είναι beta:
 δοκιμάστε το πρώτα εσείς, πριν το δώσετε σε μαθητή.
 
 ### 🐧 Linux
 
 <p>
-  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.AppImage"><img src="Assets/buttons/linux-appimage.png" alt="Λήψη για Linux (AppImage)" width="400"></a>
-  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/voice-desktop_0.1.0-beta.1_amd64.deb"><img src="Assets/buttons/linux-deb.png" alt="Λήψη για Linux (.deb)" width="400"></a>
+  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.3/VOICE-0.1.0-beta.3.AppImage"><img src="Assets/buttons/linux-appimage.png" alt="Λήψη για Linux (AppImage)" width="400"></a>
+  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.3/voice-desktop_0.1.0-beta.3_amd64.deb"><img src="Assets/buttons/linux-deb.png" alt="Λήψη για Linux (.deb)" width="400"></a>
 </p>
 
 Το **.deb** εγκαθίσταται με διπλό κλικ σε Ubuntu, Linux Mint και Debian. Το **AppImage** τρέχει παντού: δεξί κλικ →
@@ -45,7 +45,7 @@
 ### 🪟 Windows
 
 <p>
-  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.exe"><img src="Assets/buttons/windows.png" alt="Λήψη για Windows" width="400"></a>
+  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.3/VOICE-0.1.0-beta.3.exe"><img src="Assets/buttons/windows.png" alt="Λήψη για Windows" width="400"></a>
 </p>
 
 Windows 10 ή 11, 64-bit. Όλα δουλεύουν και **χωρίς internet**: αναγνώριση ομιλίας, μετάφραση ελληνικά ↔ αγγλικά
@@ -56,7 +56,7 @@ Windows 10 ή 11, 64-bit. Όλα δουλεύουν και **χωρίς internet
 ### 🤖 Android (tablet και κινητό)
 
 <p>
-  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.1/VOICE-0.1.0-beta.1.apk"><img src="Assets/buttons/android.png" alt="Λήψη για Android" width="400"></a>
+  <a href="https://github.com/kalotrapezis/Voice/releases/download/v0.1.0-beta.3/VOICE-0.1.0-beta.3.apk"><img src="Assets/buttons/android.png" alt="Λήψη για Android" width="400"></a>
 </p>
 
 Android 7 ή νεότερο. Η αναγνώριση γίνεται στη συσκευή:
@@ -80,6 +80,13 @@ Android 7 ή νεότερο. Η αναγνώριση γίνεται στη συ�
 - **Ο μαθητής απαντά.** Γράφει στο «Μήνυμα στον δάσκαλο» και το tablet το διαβάζει φωναχτά. Ένα κουμπί ανεβάζει το
   πλαίσιο ψηλά, για να μην το κρύβει το πληκτρολόγιο. Με τις **Γρήγορες ερωτήσεις** βλέπει τρεις έτοιμες ερωτήσεις
   από όσα είπατε και ρωτά με ένα άγγιγμα.
+- **Κινητά και tablet ως μικρόφωνα της τάξης.** Στον υπολογιστή, Teleprompt → **+ Μικρόφωνο** δείχνει έναν κωδικό
+  QR. Στο κινητό, η καρτέλα **Μικρόφωνο PC** τον σκανάρει μία φορά· μετά αρκεί ένα κουμπί, και στέλνει ήχο και με
+  κλειστή οθόνη. Ο υπολογιστής ακούει κάθε στιγμή όποιο μικρόφωνο ακούει καλύτερα, χωρίς ρυθμίσεις. Χρειάζεται το ίδιο
+  Wi-Fi· αν το σχολικό δίκτυο χωρίζει τις συσκευές, ένα hotspot από το κινητό αρκεί (χωρίς internet).
+
+  ![Κινητά ως μικρόφωνα: ο κωδικός QR στον υπολογιστή και το κουμπί στο κινητό](Screenshots/web/mics.png)
+
 - **Μετάφραση για μαθητές που δεν ξέρουν ελληνικά.** Ελληνικά ↔ αγγλικά **χωρίς internet**, με τα μοντέλα του Firefox,
   μέσα σε κλάσματα του δευτερολέπτου. Με κλειδί Mistral ή OpenAI και σε αλβανικά, αραβικά, ουκρανικά και άλλες
   γλώσσες. Γράφεται μόνο η μετάφραση, για να μην περιμένει ο μαθητής δύο κείμενα.
@@ -120,9 +127,6 @@ cd electron && npm install && npm start
 npm run dist:linux               # AppImage και .deb
 sh ../android/build.sh           # το APK
 ```
-
-Η παλιότερη εφαρμογή GTK για Linux (πληκτρολόγιο φωνής, πρόχειρο, σημειωματάριο) περιγράφεται στο
-[README-GTK.md](README-GTK.md).
 
 ## Άδειες
 

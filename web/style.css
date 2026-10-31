@@ -2,7 +2,7 @@
 :root {
   --bg: #eef0f1; --island: #ffffffe6; --island-2: #e1e4e6; --hover: #0000000d;
   --text: #1b1d1f; --muted: #5d6368; --accent: #1b1d1f; --on-accent: #fff;
-  --rec: #e01b24; --radius: 28px;
+  --rec: #e01b24; --ok: #26a269; --wait: #e5a50a; --radius: 28px;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -31,8 +31,9 @@ button:focus-visible, .field:focus-visible, textarea:focus-visible { outline: 2p
 .nav-item.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 .nav-item.foot { margin-top: auto; }
 
-.content { flex: 1; min-width: 0; position: relative; }
-.page { display: none; height: 100%; flex-direction: column; gap: 12px; padding: 4px 12px 12px; overflow-y: auto; }
+/* a column, so the «no microphone» banner (when shown) sits above the page and the page takes the rest */
+.content { flex: 1; min-width: 0; position: relative; display: flex; flex-direction: column; }
+.page { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 12px; padding: 4px 12px 12px; overflow-y: auto; }
 .page.shown { display: flex; }
 h1 { font-size: 28px; font-weight: 600; margin: 4px 4px 4px; }
 
@@ -160,6 +161,11 @@ body.immersive .island, body.immersive .prompt-view { border-radius: 0; }
   .slider.wide { grid-template-columns: 1fr; }
   .nav-item { padding: 8px 10px; font-size: 11px; }
 }
+/* six tabs on a phone: the bar spans the width and every tab gets an equal share */
+@media (max-width: 480px) {
+  .rail { left: 8px; right: 8px; translate: none; }
+  .nav-item { flex: 1 1 0; min-width: 0; padding: 7px 2px; font-size: 10px; line-height: 1.15; text-align: center; border-radius: 18px; }
+}
 
 /* mini window (Electron): one pill — mic, pause, status, back to the big window; drag it by any empty part */
 .mini-only { display: none !important; }
@@ -187,3 +193,43 @@ body.mini .status { white-space: nowrap; overflow: hidden; text-overflow: ellips
 .welcome-card p { margin: 0; }
 .welcome-card .pill-button { width: 100%; justify-content: center; padding: 14px 20px; line-height: 1.3; }
 .welcome-card small { font-weight: 400; opacity: .8; }
+
+/* Teleprompt → + Μικρόφωνο: the QR code the phones scan, and one row per microphone with its tick and level */
+.mics-card { position: relative; max-width: 520px; max-height: calc(100vh - 32px); overflow: auto; }
+.mics-card .close { position: absolute; top: 12px; right: 12px; }
+.mics-card h2 { margin: 6px 0 0; font-size: 17px; justify-self: start; }
+.mics-card .qr { background: #fff; border-radius: 16px; padding: 8px; width: 248px; line-height: 0; }
+.mics-card .qr:empty { display: none; }
+.mics-card .qr svg { width: 100%; height: auto; }
+#micsList { width: 100%; text-align: left; }
+.mic-row { padding: 8px 0; }
+.mic-row + .mic-row { border-top: 1px solid var(--island-2); }
+.mic-row span { flex: 0 1 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mic-row .level { flex: 1; }
+.mic-row.lead span { font-weight: 700; }
+#addMicBtn { background: var(--island-2); }
+.mic-row input:disabled { opacity: .5; }
+/* no microphone at all: a red banner, and the record buttons greyed out (paintRec) */
+.nomic { margin: 0 0 10px; padding: 10px 20px; border-radius: 18px; background: var(--rec); color: #fff; font-weight: 600; text-align: center; }
+body.mini .nomic { display: none; }
+
+/* Μικρόφωνο PC (phone): pair once with the camera, then a big mic, a wave and a light */
+.pair { display: grid; gap: 12px; max-width: 520px; }
+.pair p, .pair ol { margin: 0; }
+.pair .pill-button { justify-self: start; background: var(--island-2); }
+.steps { padding-left: 22px; display: grid; gap: 4px; }
+.scan { border-radius: var(--radius); overflow: hidden; background: #000; aspect-ratio: 1; }
+.scan video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pcmic { display: grid; justify-items: center; gap: 22px; padding: 24px 8px; text-align: center; }
+.pc-name { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 20px; font-weight: 600; }
+.light { width: 14px; height: 14px; border-radius: 50%; background: var(--muted); flex: none; }
+.light.ok { background: var(--ok); box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 25%, transparent); }
+.light.wait { background: var(--wait); animation: blink 1s infinite; }
+.light.bad { background: var(--rec); }
+@keyframes blink { 50% { opacity: .3; } }
+.pcmic-btn { width: 160px; height: 160px; border-radius: 50%; display: grid; place-items: center; background: var(--island-2); color: var(--text); transition: transform .1s; }
+.pcmic-btn:active { transform: scale(.95); }
+.pcmic-btn.on { background: var(--rec); color: #fff; animation: pulse 1.6s infinite; }
+#micWave { width: 100%; max-width: 420px; height: 80px; }
+.pcmic .hint { max-width: 360px; margin: 0; }
+.link-button { color: var(--muted); text-decoration: underline; padding: 8px; }

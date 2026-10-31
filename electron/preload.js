@@ -6,6 +6,11 @@ ipcRenderer.on('sys:pcm', (_e, buf) => {
   if (onPcm) onPcm(new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2).slice());
 });
 
+let onWifi = null;
+ipcRenderer.on('wifi:pcm', (_e, id, name, buf) => {
+  if (onWifi) onWifi(id, name, new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2).slice());
+});
+
 contextBridge.exposeInMainWorld('voiceElectron', {
   platform: process.platform,
   getKey: () => ipcRenderer.invoke('key:get'),
@@ -25,6 +30,7 @@ contextBridge.exposeInMainWorld('voiceElectron', {
   synth: (text, rate) => ipcRenderer.invoke('tts:synth', text, rate),
   startSystem: cb => { onPcm = cb; return ipcRenderer.invoke('sys:start'); },
   stopSystem: () => { onPcm = null; return ipcRenderer.invoke('sys:stop'); },
+  wifiStart: (code, cb) => { onWifi = cb; return ipcRenderer.invoke('wifi:start', code); },
   openMini: () => ipcRenderer.invoke('mini:open'),
   closeMini: () => ipcRenderer.invoke('mini:close'),
   type: text => ipcRenderer.invoke('type', text),

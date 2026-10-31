@@ -39,8 +39,6 @@ macOS has no system-audio capture.
 
 ## How the meeting works
 
-This matches what the GTK app learned (`voice_gtk.py` MeetingPage):
-
 - Audio goes in **~25 s chunks**, cut on the quietest 30 ms of the last 5 s. Chunks that are digital silence are not sent.
 - With **"Και τα δύο"** (both sources), the microphone goes only as **VAD phrases**, labelled "Εγώ". The speakers go in 25 s chunks, labelled "Ηχεία".
 - On stop, queued chunks are **always awaited**, never dropped.
@@ -58,7 +56,7 @@ The same page as on Android, built for reading from a distance:
 - smooth, slow scrolling with a speed slider;
 - dark/light contrast and full screen.
 
-On the desktop, captions come from Mistral as **short VAD phrases** (≤12 s). Each phrase appears about 1–3 s after it ends; there are no 25 s chunks. Local whisper isn't wired in here; the GTK app has it.
+On the desktop, captions come from Mistral as **short VAD phrases** (≤12 s). Each phrase appears about 1–3 s after it ends; there are no 25 s chunks. Without a key, local whisper.cpp does the same phrases offline.
 
 ![Teleprompt](../Screenshots/web/desktop-teleprompt.png)
 

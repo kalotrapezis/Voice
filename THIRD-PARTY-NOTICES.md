@@ -26,6 +26,8 @@ Languages*, 2023, [arXiv:2305.13516](https://arxiv.org/abs/2305.13516).
 | [bergamot-translator](https://github.com/browsermt/bergamot-translator) (η μηχανή της μετάφρασης) | MPL 2.0 ([`licenses/MPL-2.0.txt`](licenses/MPL-2.0.txt)) |
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) (τρέχει τη φωνή MMS) | MIT ([`licenses/onnxruntime-MIT.txt`](licenses/onnxruntime-MIT.txt)) |
 | [pdf.js](https://github.com/mozilla/pdf.js) (ανοίγει τα PDF) | Apache 2.0 ([`licenses/pdf.js-Apache-2.0.txt`](licenses/pdf.js-Apache-2.0.txt)) |
+| [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) 1.4.4, © 2009 Kazuhiko Arase (ο κωδικός QR για τα κινητά-μικρόφωνα) | MIT (η σημείωση μέσα στο `web/vendor/qr/qrcode.js`) |
+| [jsQR](https://github.com/cozmo/jsQR) 1.4.0 (διαβάζει τον κωδικό QR στο κινητό) | Apache 2.0 ([`licenses/jsQR-Apache-2.0.txt`](licenses/jsQR-Apache-2.0.txt)) |
 | [Electron](https://www.electronjs.org/) | MIT (μέσα στο πακέτο, `LICENSE.electron.txt` και `LICENSES.chromium.html`) |
 | whisper.cpp για Windows, η [επίσημη έκδοση](https://github.com/ggml-org/whisper.cpp/releases) `b5454` | MIT ([`licenses/whisper.cpp-MIT.txt`](licenses/whisper.cpp-MIT.txt)) |
 | Microsoft Visual C++ Runtime (`msvcp140*.dll`, `vcruntime140*.dll`, μόνο στο πακέτο Windows) | αρχεία που η Microsoft επιτρέπει να διανέμονται μαζί με εφαρμογές (Visual Studio 2022, «Distributable Code»), από τον επίσημο `vc_redist.x64.exe` |

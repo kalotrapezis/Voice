@@ -20,6 +20,7 @@ const host = (() => {
     getKey: () => E.getKey(), setKey: k => E.setKey(k),
     save: (text, name) => E.save(text, name), keepAwake: on => E.keepAwake(on),
     startSystem: onPcm => E.startSystem(onPcm), stopSystem: () => E.stopSystem(),
+    wifiStart: (code, onPcm) => E.wifiStart(code, onPcm),
     piper: () => E.piper(), synth: (t, rate) => E.synth(t, rate),
     whisperReady: () => E.whisperReady(), whisper: (wav, tr) => E.whisper(wav, tr),
     mms: t => E.mms(t), models: E.models,
@@ -33,6 +34,10 @@ const host = (() => {
     // on-device captions (SpeechRecognizer): events come back through window.onRecog / onRecogInfo
     listen: on => A.listen(on), setLang: l => A.setLang(l), checkRecognizer: () => A.checkRecognizer(), downloadGreek: () => A.downloadGreek(),
     speak: (text, rate) => A.speak(text, rate), stopSpeak: () => A.stopSpeak(), ttsInfo: () => A.ttsInfo(),
+    // «Μικρόφωνο PC»: MicService sends this device's sound to a computer, also with the screen off
+    micStart: o => A.micStart(JSON.stringify(o)), micStop: () => A.micStop(), micState: () => JSON.parse(A.micState()),
+    micPermissions: () => new Promise(ok => { window.onPerms = ok; A.micPermissions(); }),
+    deviceName: () => A.deviceName(),
   };
   // plain browser, for working on the UI only: the key sits in localStorage
   return {
@@ -93,6 +98,7 @@ function show(page) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   if (!MINI) prefs.set('page', page);
   if (page === 'read') ttsInfo();
+  if (page === 'pcmic') pcmic?.enter(); else pcmic?.leave();
 }
 document.querySelectorAll('.nav-item').forEach(n => n.onclick = () => show(n.dataset.page));
 
@@ -162,6 +168,14 @@ async function openSystem(onPcm) {
   return streamPcm(s, onPcm);
 }
 
+// this computer's mic, mixed with the phones once any have joined (Teleprompt → + Μικρόφωνο)
+async function openRoomMic(onPcm) {
+  if (!mics?.running) return openMic(onPcm);
+  const close = await openMic(p => mics.push('local', p, 'Αυτός ο υπολογιστής'));
+  mics.out = onPcm;
+  return () => { close(); mics.out = null; mics.drop('local'); };
+}
+
 function micError(e) {
   if (e.name === 'NotAllowedError') return host.system === 'loopback'
     ? 'Τα Windows δεν δίνουν το μικρόφωνο: Ρυθμίσεις → Απόρρητο και ασφάλεια → Μικρόφωνο → άνοιξε «Πρόσβαση στο μικρόφωνο» και «Να επιτρέπεται σε εφαρμογές υπολογιστή».'
@@ -218,6 +232,7 @@ async function retry(fn) {
 // ---------- recording session (one at a time) ----------
 
 const rec = { mode: null, busy: false, tracks: [], closers: [], queue: Promise.resolve(), pending: 0 };
+let noMic = false; // no microphone anywhere (see checkMic): the record buttons are greyed out
 const panel = mode => document.getElementById(mode);
 const recBtn = mode => panel(mode).querySelector('.rec');
 
@@ -233,7 +248,7 @@ function paintRec() {
     b.innerHTML = icon(on ? 'stop' : 'mic', b.dataset.label ? 24 : 32) + (b.dataset.label ? `<span>${on ? 'Διακοπή' : b.dataset.label}</span>` : '');
     b.classList.toggle('on', on);
     b.setAttribute('aria-label', on ? 'Τέλος ηχογράφησης' : 'Έναρξη ηχογράφησης');
-    b.disabled = rec.busy;
+    b.disabled = rec.busy || (noMic && !rec.mode);
   }
 }
 
@@ -248,6 +263,7 @@ async function toggleRec(mode) {
     if (rec.mode === mode) return stopRec();
     return toast('Ήδη ηχογραφείς στην άλλη σελίδα.');
   }
+  if (host.micState?.().on) return toast('Η συσκευή είναι μικρόφωνο του υπολογιστή: σταμάτησέ το πρώτα στο «Μικρόφωνο PC».');
   if (useLocal()) return startLocal(mode);
   const key = await apiKey();
   // desktop without a key or a network (e.g. a classroom with no internet) falls back to whisper on this computer
@@ -271,9 +287,9 @@ async function toggleRec(mode) {
       const t = new Track(both ? 'Εγώ' : '', both || mode === 'prompt' || MINI, rec.diarize, submit);
       rec.tracks.push(t);
       // while the pupil's message is read aloud the mic would caption the tablet's own voice
-      rec.closers.push(await openMic(p => { if (!speech.on && !rec.paused) t.push(p); level(p); }));
+      rec.closers.push(await openRoomMic(p => { if (!speech.on && !rec.paused) t.push(p); level(p); }));
     }
-    if (src !== 'mic') {
+    if (src === 'system' || both) {
       const t = new Track(both ? 'Ηχεία' : '', mode === 'prompt', rec.diarize, submit);
       rec.tracks.push(t);
       rec.closers.push(await openSystem(p => { if (!rec.paused) t.push(p); if (!both) level(p); }));
@@ -810,7 +826,259 @@ function paintSource() {
   segmented($('#sourcePick'), SOURCES, v, pick);
   segmented($('#inputPick'), SOURCES, v, pick);
   $('#promptSource').value = v;
+  checkMic();
 }
+
+// ---------- no microphone: the app has nothing to caption, so it says so and greys out recording ----------
+// a phone that joined (Teleprompt → + Μικρόφωνο) counts as a microphone; «Ήχος υπολογιστή» needs none
+async function checkMic() {
+  let has = true;
+  try { has = (await navigator.mediaDevices.enumerateDevices()).some(d => d.kind === 'audioinput'); } catch { /* can't tell: don't block */ }
+  noMic = !has && !mics?.phones() && (!host.system || prefs.get('source', 'mic') !== 'system');
+  $('#noMic').hidden = !noMic;
+  paintRec();
+}
+navigator.mediaDevices?.addEventListener?.('devicechange', checkMic); // plugged in or out
+
+// ---------- extra mics (desktop): phones/tablets around the room send their sound; whoever hears best leads ----------
+
+const mics = (() => {
+  if (!host.wifiStart || MINI) { $('#micsDlg').remove(); return null; } // the mini window keeps to the plain mic
+  const mixer = new AutoMixer(), seen = new Map(), list = $('#micsList'), dlg = $('#micsDlg'), btn = $('#addMicBtn');
+  const off = new Set(JSON.parse(prefs.get('micsOff', '[]'))); // the devices whose tick was taken away
+  let code = prefs.get('wifiCode', '');
+  if (!/^\d{4}$/.test(code)) prefs.set('wifiCode', code = String(1000 + Math.floor(Math.random() * 9000)));
+  let timer = null, t0 = 0, made = 0, rows = null, info = null;
+  const self = {
+    out: null,
+    get running() { return !!timer; },
+    // runs from the first time a phone is added until VOICE closes, so the phones reconnect on their own
+    async start() {
+      if (timer) return;
+      timer = setInterval(tick, 100);
+      t0 = performance.now();
+      made = 0;
+      try {
+        info = await host.wifiStart(code, (id, name, pcm) => {
+          if (mixer.inputs.size >= 9 && !mixer.inputs.has(id)) return; // a handful of devices, not the whole school
+          self.push(id, pcm, name || 'Συσκευή');
+          prefs.set('micsUsed', '1');
+        });
+      } catch (e) {
+        clearInterval(timer);
+        timer = null;
+        info = null;
+        throw e;
+      }
+    },
+    push(id, pcm, name) {
+      if (!mixer.inputs.has(id)) { mixer.push(id, pcm, name); mixer.inputs.get(id).muted = off.has(id); } else mixer.push(id, pcm, name);
+      seen.set(id, performance.now());
+    },
+    drop(id) { mixer.inputs.delete(id); seen.delete(id); },
+    // connected phones whose tick is on
+    phones: () => [...mixer.inputs.keys()].filter(id => id !== 'local' && !off.has(id)).length,
+  };
+  let phonesBefore = 0;
+  function tick() {
+    // samples owed by the clock, not one block per tick: timers drift and stall, the audio must not
+    const n = Math.round((performance.now() - t0) * SR / 1000) - made;
+    if (n <= 0) return;
+    made += n;
+    for (const [id, t] of seen) if (performance.now() - t > 5000) self.drop(id); // the phone went away
+    // never zero microphones: this computer's mic switches off only while a ticked phone is connected
+    const phones = self.phones(), local = mixer.inputs.get('local');
+    if (local) local.muted = off.has('local') && phones > 0;
+    if ((phones > 0) !== (phonesBefore > 0)) checkMic();
+    phonesBefore = phones;
+    const pcm = mixer.pull(n);
+    if (self.out) self.out(pcm);
+    paint();
+  }
+  function paintButton() {
+    const n = [...mixer.inputs.keys()].filter(id => id !== 'local').length;
+    btn.innerHTML = n ? icon('phone', 20) + `<span>Μικρόφωνα: ${n + 1}</span>` : icon('add', 20) + '<span>Μικρόφωνο</span>';
+  }
+  function paint() {
+    paintButton();
+    if (dlg.hidden) return;
+    // this computer's mic is always listed, so its tick can be taken away before recording
+    const ins = [['local', mixer.inputs.get('local') || { name: 'Αυτός ο υπολογιστής', level: 0, gain: 0 }],
+      ...[...mixer.inputs].filter(([id]) => id !== 'local')];
+    const key = ins.map(([id]) => id).join('|');
+    if (key !== rows) {
+      rows = key;
+      list.replaceChildren(...ins.map(([id, i]) => {
+        const row = document.createElement('label');
+        row.className = 'mic-row check';
+        row.dataset.id = id;
+        row.innerHTML = '<input type="checkbox"><span></span><div class="level"><i></i></div>';
+        row.querySelector('span').textContent = i.name;
+        const box = row.querySelector('input');
+        box.checked = !off.has(id);
+        box.onchange = () => {
+          if (box.checked) off.delete(id); else off.add(id);
+          prefs.set('micsOff', JSON.stringify([...off]));
+          const live = mixer.inputs.get(id);
+          if (live && id !== 'local') live.muted = !box.checked; // tick() decides for this computer's mic
+        };
+        return row;
+      }));
+      if (ins.length === 1) list.insertAdjacentHTML('beforeend', '<p class="hint">Κανένα κινητό ακόμα.</p>');
+    }
+    let lead = null;
+    for (const [, i] of mixer.inputs) if (!lead || i.gain > lead.gain) lead = i;
+    const box = list.querySelector('.mic-row[data-id="local"] input'), alone = !self.phones();
+    box.disabled = alone;
+    box.checked = alone || !off.has('local');
+    box.parentElement.title = alone ? 'Μένει ανοιχτό όσο δεν υπάρχει άλλο μικρόφωνο.' : '';
+    for (const row of list.querySelectorAll('.mic-row')) {
+      const i = mixer.inputs.get(row.dataset.id);
+      row.querySelector('.level i').style.width = i ? Math.min(100, Math.sqrt(i.level / 6000) * 100) + '%' : '0';
+      row.classList.toggle('lead', !!i && i === lead && i.gain > 0.5 && mixer.inputs.size > 1);
+    }
+  }
+  async function open() {
+    dlg.hidden = false;
+    rows = null;
+    $('#micsQr').textContent = '';
+    try { await Promise.all([self.start(), window.qrcode || loadScript('vendor/qr/qrcode.js')]); } catch (e) {
+      $('#micsWifi').textContent = 'Τα κινητά δεν μπορούν να συνδεθούν: ' + e.message;
+      return;
+    }
+    $('#micsWifi').innerHTML = info.ssid ? `Σύνδεσε το κινητό ή το tablet στο Wi-Fi <b></b>.` : 'Σύνδεσε το κινητό ή το tablet στο ίδιο Wi-Fi με αυτόν τον υπολογιστή.';
+    if (info.ssid) $('#micsWifi b').textContent = info.ssid;
+    if (!info.addrs.length) return void ($('#micsAddr').textContent = 'Ο υπολογιστής δεν είναι συνδεδεμένος σε δίκτυο.');
+    const qr = qrcode(0, 'M');
+    qr.addData(pairText({ ...info, code }));
+    qr.make();
+    $('#micsQr').innerHTML = qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true });
+    $('#micsAddr').textContent = `${info.addrs.join(' ή ')} · κωδικός ${code}`;
+    paint();
+  }
+  btn.hidden = $('#micsOpen').hidden = false;
+  btn.onclick = $('#micsOpen').onclick = open;
+  $('#micsClose').onclick = () => { dlg.hidden = true; };
+  dlg.onclick = e => { if (e.target === dlg) dlg.hidden = true; };
+  addEventListener('keydown', e => { if (e.key === 'Escape') dlg.hidden = true; });
+  paintButton();
+  if (prefs.get('micsUsed', '')) self.start().catch(() => {}); // phones paired before reconnect without opening the page
+  return self;
+})();
+
+// ---------- Μικρόφωνο PC (phone/tablet): scan the computer's QR code once, then one button ----------
+
+const pcmic = (() => {
+  if (host.system) { $('#pcmic').remove(); document.querySelector('[data-page="pcmic"]').remove(); return null; }
+  const video = $('#scanVideo'), wave = $('#micWave'), btn = $('#pcmicBtn'), levels = new Array(60).fill(0);
+  let pair = parsePair(prefs.get('pcPair', '')), stream = null, scanTimer = null, poll = null, scanning = false, last = {};
+  let id = prefs.get('sendId', '');
+  if (!id) prefs.set('sendId', id = Math.random().toString(36).slice(2, 10));
+  const scanSay = t => { $('#scanStatus').textContent = t; };
+  window.onCamera = (_, msg) => scanSay(msg);
+
+  function view() {
+    $('#pairView').hidden = !scanning;
+    $('#micView').hidden = scanning;
+    $('#pairBack').hidden = !pair;
+    if (pair) $('#micPc').textContent = pair.pc;
+  }
+
+  async function scan() {
+    scanning = true;
+    view();
+    scanSay('Ανοίγει η κάμερα…');
+    try {
+      await (window.jsQR || loadScript('vendor/qr/jsQR.js'));
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    } catch (e) {
+      return scanSay(e.name === 'NotAllowedError' ? 'Χρειάζεται η κάμερα για τον κωδικό QR.' : 'Η κάμερα δεν άνοιξε: ' + e.message);
+    }
+    if (!scanning) return stopCamera(); // left the page while the camera was opening
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    scanSay('Στόχευσε τον κωδικό QR στην οθόνη του υπολογιστή.');
+    const c = document.createElement('canvas'), g = c.getContext('2d', { willReadFrequently: true });
+    scanTimer = setInterval(() => {
+      if (!video.videoWidth) return;
+      const k = Math.min(1, 640 / video.videoWidth);
+      c.width = Math.round(video.videoWidth * k);
+      c.height = Math.round(video.videoHeight * k);
+      g.drawImage(video, 0, 0, c.width, c.height);
+      const hit = jsQR(g.getImageData(0, 0, c.width, c.height).data, c.width, c.height, { inversionAttempts: 'dontInvert' });
+      if (!hit) return;
+      const p = parsePair(hit.data);
+      if (!p) return scanSay('Αυτός δεν είναι κωδικός του VOICE.');
+      if (navigator.vibrate) navigator.vibrate(30);
+      pair = p;
+      prefs.set('pcPair', hit.data);
+      stopScan();
+      if (!host.micState?.().on) return start();
+      host.micStop(); // was sending to another computer: let the service end first
+      setTimeout(start, 800);
+    }, 250);
+  }
+
+  function stopCamera() {
+    clearInterval(scanTimer);
+    scanTimer = null;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    video.srcObject = null;
+  }
+  function stopScan() { scanning = false; stopCamera(); view(); }
+
+  function start() {
+    if (rec.mode) return toast('Σταμάτησε πρώτα την ηχογράφηση.');
+    if (!host.micStart) return toast('Μόνο στην εφαρμογή Android.');
+    host.micStart({ ...pair, id, name: host.deviceName() });
+  }
+
+  function paint() {
+    const st = host.micState ? host.micState() : {};
+    if (st.on !== last.on || st.ok !== last.ok || st.problem !== last.problem) {
+      last = st;
+      btn.classList.toggle('on', !!st.on);
+      btn.innerHTML = icon('mic', 56);
+      btn.setAttribute('aria-label', st.on ? 'Σταμάτημα μικροφώνου' : 'Έναρξη μικροφώνου');
+      const state = !st.on ? 'off' : st.problem === 'code' ? 'bad' : st.ok ? 'ok' : 'wait';
+      $('#micLight').className = 'light ' + state;
+      $('#micStatus').textContent = {
+        off: 'Πάτησε το μικρόφωνο για να στέλνει ήχο στον υπολογιστή. Συνεχίζει και με κλειστή οθόνη.',
+        ok: 'Συνδεδεμένο: ο υπολογιστής ακούει από εδώ. Μπορείς να κλείσεις την οθόνη.',
+        wait: 'Ψάχνει τον υπολογιστή… Ίδιο Wi-Fi; Είναι ανοιχτό το VOICE εκεί;',
+        bad: 'Ο υπολογιστής δεν δέχεται αυτή τη συσκευή: σάρωσε ξανά τον κωδικό QR.',
+      }[state];
+    }
+    levels.push(st.on ? Math.min(1, Math.sqrt((st.level || 0) / 6000)) : 0);
+    levels.shift();
+    const w = wave.width = wave.clientWidth * devicePixelRatio, h = wave.height = 80 * devicePixelRatio, g = wave.getContext('2d');
+    g.fillStyle = getComputedStyle(document.body).getPropertyValue(st.on && st.ok ? '--ok' : '--muted');
+    const bw = w / levels.length;
+    levels.forEach((l, i) => { const bh = Math.max(2 * devicePixelRatio, l * h); g.fillRect(i * bw + bw * 0.2, (h - bh) / 2, bw * 0.6, bh); });
+  }
+
+  btn.onclick = () => (host.micState?.().on ? host.micStop() : start());
+  $('#repairBtn').onclick = scan;
+  $('#pairBack').onclick = stopScan;
+  return {
+    // the first visit asks for every permission at once, then opens the camera; afterwards straight to the mic
+    async enter() {
+      clearInterval(poll); poll = setInterval(paint, 100); paint();
+      if (pair) return view();
+      if (host.micPermissions && !prefs.get('pcmicAsked', '')) {
+        prefs.set('pcmicAsked', '1');
+        scanning = true; view();
+        scanSay('Το VOICE θα ζητήσει κάμερα (για τον κωδικό QR), μικρόφωνο και ειδοποιήσεις.');
+        await host.micPermissions();
+        if (!scanning) return; // left the tab while Android was asking
+      }
+      scan();
+    },
+    leave() { if (scanning) { scanning = false; stopCamera(); } clearInterval(poll); poll = null; },
+  };
+})();
+
 if (host.system) {
   $('#promptSource').onchange = e => { prefs.set('source', e.target.value); paintSource(); };
   paintSource();
@@ -1070,10 +1338,11 @@ if (host.listen) {
 if (host.models) host.models.base().then(b => { if (b) { local.base = b; localMT = true; } });
 if (host.whisperReady) host.whisperReady().then(m => {
   whisperModels = m;
-  $('#recogInfo').textContent = m.length ? '' : 'Δεν βρέθηκε το whisper.cpp ή μοντέλο του σε αυτόν τον υπολογιστή· τα τοπικά μοντέλα τα κατεβάζει η εφαρμογή GTK (Ρυθμίσεις → Μοντέλο ομιλίας).';
+  $('#recogInfo').textContent = m.length ? '' : 'Δεν βρέθηκε το whisper.cpp ή μοντέλο του σε αυτόν τον υπολογιστή· κατέβασέ τα από τις Ρυθμίσεις → Τοπικά μοντέλα.';
   paintEngine();
 });
 
 paintRec();
 paintEngine();
+checkMic();
 apiKey().then(k => show(MINI ? 'dictate' : k || useLocal() ? prefs.get('page', 'dictate') : 'settings'));

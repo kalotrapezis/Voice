@@ -38,6 +38,49 @@ for (let i = 0; i < 33; i++) vad.push(frame(50));
 assert.strictEqual(phrases.length, 1);
 assert.ok(Math.abs(phrases[0][1] / v.SR - 0.5) < 0.25, 'phrase start ' + phrases[0][1]);
 
+// automixer: the device nearer the speaker leads, the same voice is not doubled, mute means silent
+{
+  const tone = (n, amp) => new Int16Array(n).map((_, i) => Math.round(amp * Math.sin(i / 3)));
+  const mix = new v.AutoMixer(), B = v.SR / 10, out = [];
+  // 1 s of room noise on both, then the left phone hears a voice loud and the right one faintly, then the reverse
+  const feed = (l, r, blocks) => { for (let k = 0; k < blocks; k++) { mix.push('L', tone(B, l)); mix.push('R', tone(B, r)); out.push(v.rms(mix.pull(B), 0, B)); } };
+  feed(100, 100, 10);
+  assert.strictEqual(out.slice(0, 4).reduce((a, b) => a + b), 0, 'nothing comes out before 0.5 s is buffered');
+  feed(8000, 1500, 20);
+  feed(1500, 8000, 20);
+  const late = (from, to) => out.slice(from, to).reduce((a, b) => a + b) / (to - from);
+  // allow for the 0.5 s buffer: blocks 20–30 are the left voice, 40–50 the right one
+  assert.ok(late(20, 30) > 5000 && late(20, 30) < 6200, 'left leads: ' + late(20, 30));
+  assert.ok(late(40, 50) > 5000 && late(40, 50) < 6200, 'right leads: ' + late(40, 50));
+  // both hear it equally: about one voice's level, not two summed
+  const same = new v.AutoMixer(), lv = [];
+  for (let k = 0; k < 30; k++) { same.push('a', tone(B, k < 10 ? 100 : 6000)); same.push('b', tone(B, k < 10 ? 100 : 6000)); lv.push(v.rms(same.pull(B), 0, B)); }
+  assert.ok(lv[29] < 4600, 'not doubled: ' + lv[29]);
+  // a muted device never comes through, even when it is the only loud one
+  const mute = new v.AutoMixer();
+  let last = 0;
+  for (let k = 0; k < 30; k++) {
+    mute.push('a', tone(B, 100)); mute.push('b', tone(B, k < 10 ? 100 : 8000));
+    if (k === 10) mute.inputs.get('b').muted = true;
+    last = v.rms(mute.pull(B), 0, B);
+  }
+  assert.ok(last < 200, 'muted device leaks: ' + last);
+  // a device that fell far behind skips ahead to the 0.5 s buffer
+  const lag = new v.AutoMixer();
+  lag.push('a', tone(3 * v.SR, 100));
+  lag.pull(B);
+  assert.strictEqual(lag.inputs.get('a').len, v.SR / 2 - B);
+}
+
+// the QR code the phone scans: round trip, and junk is refused
+{
+  const p = { addrs: ['192.168.1.5', '10.0.0.2'], port: 8790, code: '0427', pc: 'Λάπτοπ & Co' };
+  assert.deepStrictEqual(v.parsePair(v.pairText(p)), p);
+  assert.strictEqual(v.parsePair('https://example.com'), null);
+  assert.strictEqual(v.parsePair('voicemic:1?a=evil.com&p=8790&c=1234'), null);
+  assert.strictEqual(v.parsePair('voicemic:1?a=10.0.0.1&p=8790&c=12'), null);
+}
+
 assert.deepStrictEqual(v.ttsChunks('Ένα. Δύο; Τρία'), ['Ένα.', 'Δύο;', 'Τρία']);
 assert.deepStrictEqual(v.terms(' a, ,b '), ['a', 'b']);
 // offline voice: number words and tokens match tts_server.py's (the Python original)

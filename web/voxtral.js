@@ -1,5 +1,4 @@
 // DOM-free core shared by every shell: audio math, WAV, the Voxtral API, VAD, TTS chunks.
-// Ported from voice_keyboard.py / voice_gtk.py (MeetingPage) so both apps behave alike.
 // Loaded as a plain <script>; node's test (test.js) loads it through module.exports.
 
 const SR = 16000;                 // Hz, mono Int16 everywhere
@@ -268,6 +267,61 @@ class Vad {
   }
 }
 
+/** Several mics (phones/tablets over Wi-Fi, the laptop's own) → one stream. Summing them would add up every
+ *  device's noise and play the same voice twice, a few ms apart; instead each input's gain follows how far it
+ *  stands above its own noise floor, so whoever hears the speaker best leads (an "automixer"). */
+const MIX_JITTER = SR / 2, MIX_MAX_LAG = 2 * SR; // buffer 0.5 s per device; one that falls 2 s behind skips ahead
+class AutoMixer {
+  constructor() { this.inputs = new Map(); }
+  push(id, pcm, name = id) {
+    let i = this.inputs.get(id);
+    if (!i) this.inputs.set(id, i = { name, q: [], len: 0, primed: false, gain: 0, noise: 0, level: 0, muted: false });
+    i.q.push(pcm);
+    i.len += pcm.length;
+  }
+  take(i, n) {
+    const out = new Int16Array(n);
+    let k = 0;
+    while (k < n && i.q.length) {
+      const head = i.q[0], m = Math.min(n - k, head.length);
+      out.set(head.subarray(0, m), k);
+      k += m;
+      if (m === head.length) i.q.shift(); else i.q[0] = head.subarray(m);
+    }
+    i.len -= k;
+    if (k < n) i.primed = false; // ran dry (Wi-Fi hiccup): wait for a fresh buffer instead of stuttering
+    return out;
+  }
+  pull(n) {
+    const live = [];
+    for (const i of this.inputs.values()) {
+      if (!i.primed && i.len >= MIX_JITTER) i.primed = true;
+      if (!i.primed) { i.level = 0; continue; }
+      if (i.len > MIX_MAX_LAG) this.take(i, i.len - MIX_JITTER);
+      const x = this.take(i, n), r = rms(x, 0, n);
+      // the floor drops at once and rises slowly, so a long sentence is not mistaken for noise
+      i.noise = !i.noise ? r : r < i.noise ? 0.7 * i.noise + 0.3 * r : i.noise * 1.01;
+      i.level = r;
+      live.push({ i, x, w: i.muted ? 0 : Math.max(0, r - 2 * i.noise - 50) ** 2 });
+    }
+    const sum = live.reduce((s, l) => s + l.w, 0);
+    let target = live.map(l => sum ? l.w / sum : l.i.muted ? 0 : l.i.gain); // silence: keep the last leader
+    if (!sum && target.reduce((s, g) => s + g, 0) < 0.01) {
+      const on = live.filter(l => !l.i.muted).length;
+      target = live.map(l => l.i.muted ? 0 : 1 / on);
+    }
+    const out = new Int16Array(n), acc = new Float32Array(n);
+    live.forEach((l, k) => {
+      const t = target[k], g0 = l.i.gain;
+      // rise fast so the first word is not lost, fall slowly so voices do not pump
+      const g1 = l.i.gain = g0 + (t - g0) * (t > g0 ? 0.6 : 0.15);
+      for (let s = 0; s < n; s++) acc[s] += l.x[s] * (g0 + (g1 - g0) * s / n);
+    });
+    for (let s = 0; s < n; s++) out[s] = Math.max(-32768, Math.min(32767, acc[s]));
+    return out;
+  }
+}
+
 /** Text → pieces a TTS engine starts quickly on (read_aloud.chunks). */
 function ttsChunks(text) {
   const out = [];
@@ -284,6 +338,18 @@ function ttsChunks(text) {
   return out;
 }
 
+// «Μικρόφωνο PC»: what the computer's QR code carries to the phone — every address it has, its port, code and name
+const pairText = ({ addrs, port, code, pc }) => `voicemic:1?a=${addrs.join(',')}&p=${port}&c=${code}&n=${encodeURIComponent(pc)}`;
+// anything can be shown to the camera: accept only plain IPv4 addresses, a port and a 4-digit code
+function parsePair(text) {
+  const m = /^voicemic:1\?(.*)$/.exec(String(text).trim());
+  if (!m) return null;
+  const q = new URLSearchParams(m[1]), addrs = (q.get('a') || '').split(',').filter(a => /^(\d{1,3}\.){3}\d{1,3}$/.test(a));
+  const port = Number(q.get('p')), code = q.get('c') || '';
+  if (!addrs.length || !(port > 0 && port < 65536) || !/^\d{4}$/.test(code)) return null;
+  return { addrs: addrs.slice(0, 6), port, code, pc: (q.get('n') || '').slice(0, 40) || 'υπολογιστή' };
+}
+
 if (typeof module !== 'undefined') {
-  module.exports = { MODEL_URL, MODEL_PACKS, PROVIDERS, PRICES, cost, SR, FRAME, CHUNK, CUT_WINDOW, rms, quietestCut, isSilent, concat, wav, stamp, terms, speakerLines, Vad, ttsChunks };
+  module.exports = { MODEL_URL, MODEL_PACKS, PROVIDERS, PRICES, cost, SR, FRAME, CHUNK, CUT_WINDOW, rms, quietestCut, isSilent, concat, wav, stamp, terms, speakerLines, Vad, AutoMixer, pairText, parsePair, ttsChunks };
 }

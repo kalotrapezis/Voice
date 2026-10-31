@@ -14,10 +14,12 @@
       <button class="nav-item" data-page="meeting"><span data-icon="meeting"></span><span>Σύσκεψη</span></button>
       <button class="nav-item" data-page="prompt"><span data-icon="prompt"></span><span>Teleprompt</span></button>
       <button class="nav-item" data-page="read"><span data-icon="speaker"></span><span>Ανάγνωση</span></button>
+      <button class="nav-item" data-page="pcmic"><span data-icon="phone"></span><span>Μικρόφωνο PC</span></button>
       <button class="nav-item foot" data-page="settings"><span data-icon="settings"></span><span>Ρυθμίσεις</span></button>
     </nav>
 
     <main class="content">
+      <div class="nomic" id="noMic" role="alert" hidden>Δεν βρέθηκε μικρόφωνο. Σύνδεσε ένα μικρόφωνο ή ένα κινητό (Teleprompt → + Μικρόφωνο).</div>
       <!-- Υπαγόρευση -->
       <section class="page" id="dictate">
         <h1>Υπαγόρευση</h1>
@@ -76,6 +78,7 @@
             <option value="system">Ήχος υπολογιστή</option>
             <option value="both">Μικρόφωνο + ηχεία</option>
           </select>
+          <button class="pill-button" id="addMicBtn" hidden></button>
           <button class="pill-button" id="translateBtn" aria-pressed="false">Μετάφραση</button>
           <div class="rec-info">
             <div class="level"><i></i></div>
@@ -99,6 +102,29 @@
           <textarea id="msgText" rows="2" placeholder="Μήνυμα στον δάσκαλο…" aria-label="Μήνυμα στον δάσκαλο"></textarea>
           <button class="round" id="swapBtn" aria-label="Αλλαγή θέσης: μήνυμα πάνω ή κάτω"><span data-icon="swap"></span></button>
           <button class="round big" id="msgSpeak" aria-label="Εκφώνηση του μηνύματος"><span data-icon="speaker"></span></button>
+        </div>
+      </section>
+
+      <!-- Μικρόφωνο PC (phone/tablet): this device becomes one more microphone for VOICE on a computer -->
+      <section class="page" id="pcmic">
+        <div class="pair" id="pairView">
+          <h1>Μικρόφωνο PC</h1>
+          <p>Σύνδεσε αυτή τη συσκευή με το VOICE του υπολογιστή ως επιπλέον μικρόφωνο.</p>
+          <ol class="steps">
+            <li>Στον υπολογιστή: Teleprompt → <b>+ Μικρόφωνο</b>.</li>
+            <li>Σύνδεσε τη συσκευή στο Wi-Fi που γράφει εκεί.</li>
+            <li>Σκάναρε τον κωδικό QR:</li>
+          </ol>
+          <div class="scan"><video id="scanVideo" playsinline muted></video></div>
+          <p class="hint" id="scanStatus"></p>
+          <button class="pill-button" id="pairBack" hidden>Πίσω</button>
+        </div>
+        <div class="pcmic" id="micView" hidden>
+          <p class="pc-name"><i class="light" id="micLight"></i><span id="micPc"></span></p>
+          <button class="pcmic-btn" id="pcmicBtn"></button>
+          <canvas id="micWave" height="80"></canvas>
+          <p class="hint" id="micStatus"></p>
+          <button class="link-button" id="repairBtn">Άλλος υπολογιστής: σάρωση ξανά</button>
         </div>
       </section>
 
@@ -127,6 +153,7 @@
           <h2><span data-icon="mic"></span>Είσοδος ήχου</h2>
           <div class="segmented" id="inputPick" role="radiogroup" aria-label="Είσοδος ήχου"></div>
           <p class="hint">Για όλες τις σελίδες. «Ήχος υπολογιστή»: ό,τι παίζει στα ηχεία (YouTube, βιντεοκλήση). «Και τα δύο»: φόρεσε ακουστικά, αλλιώς το μικρόφωνο ξανακούει τα ηχεία.</p>
+          <button class="pill-button" id="micsOpen" hidden><span data-icon="phone"></span>Κινητά ως μικρόφωνα</button>
         </div>
         <div class="settings-card island">
           <h2>Γλώσσα ομιλίας</h2>
@@ -202,6 +229,20 @@
       <button class="pill-button primary" id="welcomeLocal"><span>Δωρεάν, σε αυτόν τον υπολογιστή<br><small>λήψη <span id="welcomeSize"></span> μία φορά, μετά χωρίς internet</small></span></button>
       <button class="pill-button" id="welcomeKey"><span>Έχω κλειδί API (Mistral ή OpenAI)<br><small>πιο ακριβές, με internet, χρέωση ανά λεπτό</small></span></button>
       <p class="hint">Μπορείτε να το αλλάξετε όποτε θέλετε στις Ρυθμίσεις.</p>
+    </div>
+  </div>
+  <!-- Teleprompt → + Μικρόφωνο (desktop): phones and tablets join as microphones; the mix is automatic -->
+  <div class="welcome" id="micsDlg" hidden>
+    <div class="island welcome-card mics-card" role="dialog" aria-labelledby="micsTitle">
+      <button class="round close" id="micsClose" aria-label="Κλείσιμο"><span data-icon="close"></span></button>
+      <h1 id="micsTitle">Πρόσθεσε μικρόφωνο</h1>
+      <p id="micsWifi"></p>
+      <p>Μετά, στο κινητό: VOICE → <b>Μικρόφωνο PC</b> και σκάναρε:</p>
+      <div class="qr" id="micsQr"></div>
+      <p class="hint" id="micsAddr"></p>
+      <h2>Μικρόφωνα</h2>
+      <div id="micsList"></div>
+      <p class="hint">Ακούγεται κάθε στιγμή όποιο μικρόφωνο ακούει καλύτερα· η μίξη γίνεται αυτόματα. Βγάλε το τικ από όποιο δεν θέλεις· το μικρόφωνο του υπολογιστή κλείνει μόνο όσο είναι συνδεδεμένο άλλο. Αν το κινητό δεν εμφανίζεται, το σχολικό Wi-Fi ίσως χωρίζει τις συσκευές: άνοιξε hotspot στο κινητό και σύνδεσε εκεί τον υπολογιστή (δεν χρειάζεται internet). Στα Windows, την πρώτη φορά επίτρεψε το VOICE στο τείχος προστασίας.</p>
     </div>
   </div>
   <script src="icons.js"></script>

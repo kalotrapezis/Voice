@@ -15,7 +15,7 @@ cp ../web/*.html ../web/*.css ../web/*.png build/assets/ && cp ../web/icons.js .
 cp -r ../THIRD-PARTY-NOTICES.md ../licenses build/assets/
 "$BT/aapt2" compile --dir res -o build/res.zip
 "$BT/aapt2" link -I "$JAR" --manifest AndroidManifest.xml -o build/app.apk build/res.zip -A build/assets \
-    --min-sdk-version 24 --target-sdk-version 36 --version-code 2 --version-name 0.1.0-beta.1
+    --min-sdk-version 24 --target-sdk-version 36 --version-code 3 --version-name 0.1.0-beta.3
 javac -encoding UTF-8 --release 11 -cp "$JAR" -d build/classes src/gr/voice/app/*.java
 "$BT/d8" --release --min-api 24 --lib "$JAR" --output build $(find build/classes -name '*.class')
 (cd build && zip -q app.apk classes.dex)

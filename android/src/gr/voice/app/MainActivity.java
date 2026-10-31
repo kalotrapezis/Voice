@@ -51,6 +51,7 @@ public class MainActivity extends Activity {
     TextToSpeech tts;
     String ttsProblem = "Η εκφώνηση ξεκινά…";
     PermissionRequest pendingMic;
+    Intent pendingSend; // «Μικρόφωνο PC» waiting for the microphone permission
     android.webkit.ValueCallback<android.net.Uri[]> fileCb;
     volatile String lang = "el-GR"; // set from Settings → Γλώσσα ομιλίας
     // on-device captions: Android's SpeechRecognizer, restarted after every utterance so it never stops
@@ -98,13 +99,16 @@ public class MainActivity extends Activity {
                 return true;
             }
 
+            // the page asks for the microphone (recording) or the camera («Μικρόφωνο PC» scans the computer's QR code)
             @Override public void onPermissionRequest(PermissionRequest req) {
                 runOnUiThread(() -> {
-                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    String perm = java.util.Arrays.asList(req.getResources()).contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+                            ? Manifest.permission.CAMERA : Manifest.permission.RECORD_AUDIO;
+                    if (checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED) {
                         req.grant(req.getResources());
                     } else {
                         pendingMic = req;
-                        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                        requestPermissions(new String[]{perm}, 1);
                     }
                 });
             }
@@ -266,9 +270,19 @@ public class MainActivity extends Activity {
             else { listening = false; micDenied(); }
             return;
         }
+        if (code == 5) { js("onPerms", "done", ""); return; } // «Μικρόφωνο PC»: the camera can open now
+        if (code == 3) { // «Μικρόφωνο PC»; the notification permission (second) is optional
+            if (granted && pendingSend != null) startService(pendingSend);
+            else if (!granted) micDenied();
+            pendingSend = null;
+            return;
+        }
         if (pendingMic == null) return;
-        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) pendingMic.grant(pendingMic.getResources());
-        else { pendingMic.deny(); micDenied(); }
+        if (granted) pendingMic.grant(pendingMic.getResources());
+        else if (perms[0].equals(Manifest.permission.CAMERA)) {
+            pendingMic.deny();
+            js("onCamera", "denied", "Το VOICE δεν έχει άδεια κάμερας για τον κωδικό QR: Ρυθμίσεις → Εφαρμογές → VOICE → Άδειες → Κάμερα.");
+        } else { pendingMic.deny(); micDenied(); }
         pendingMic = null;
     }
 
@@ -403,6 +417,62 @@ public class MainActivity extends Activity {
                     c.hide(WindowInsets.Type.systemBars());
                 } else c.show(WindowInsets.Type.systemBars());
             });
+        }
+
+        /** «Μικρόφωνο PC»: {addrs:[..], port, code, id, name, pc} from the computer's QR code. */
+        @JavascriptInterface public void micStart(String json) {
+            try {
+                JSONObject o = new JSONObject(json);
+                org.json.JSONArray a = o.getJSONArray("addrs");
+                StringBuilder addrs = new StringBuilder();
+                for (int i = 0; i < a.length(); i++) addrs.append(i > 0 ? "," : "").append(a.getString(i));
+                Intent i = new Intent(MainActivity.this, MicService.class)
+                        .putExtra("addrs", addrs.toString()).putExtra("port", o.getInt("port"))
+                        .putExtra("code", o.getString("code")).putExtra("id", o.getString("id"))
+                        .putExtra("name", o.getString("name")).putExtra("pc", o.optString("pc", "υπολογιστή"));
+                runOnUiThread(() -> {
+                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        startService(i);
+                        // Android 13+: without this the service still runs, only its notification (with Διακοπή) is hidden
+                        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4);
+                    } else {
+                        pendingSend = i;
+                        requestPermissions(Build.VERSION.SDK_INT >= 33
+                                ? new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS}
+                                : new String[]{Manifest.permission.RECORD_AUDIO}, 3);
+                    }
+                });
+            } catch (org.json.JSONException ignored) { }
+        }
+
+        /** First visit to «Μικρόφωνο PC»: camera, microphone and notifications in one go, then window.onPerms. */
+        @JavascriptInterface public void micPermissions() {
+            runOnUiThread(() -> {
+                java.util.List<String> need = new java.util.ArrayList<>();
+                need.add(Manifest.permission.CAMERA);
+                need.add(Manifest.permission.RECORD_AUDIO);
+                if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS);
+                need.removeIf(p -> checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED);
+                if (need.isEmpty()) js("onPerms", "done", "");
+                else requestPermissions(need.toArray(new String[0]), 5);
+            });
+        }
+
+        @JavascriptInterface public void micStop() { startService(new Intent(MainActivity.this, MicService.class).setAction("stop")); }
+
+        @JavascriptInterface public String micState() {
+            try {
+                return new JSONObject().put("on", MicService.on)
+                        .put("ok", MicService.on && System.currentTimeMillis() - MicService.okAt < 2500)
+                        .put("problem", MicService.problem).put("level", MicService.level).toString();
+            } catch (org.json.JSONException e) { return "{}"; }
+        }
+
+        /** The name the user gave the device (Settings → About), else its model, e.g. "Galaxy Tab A8". */
+        @JavascriptInterface public String deviceName() {
+            String n = android.provider.Settings.Global.getString(getContentResolver(), "device_name");
+            return n != null && !n.isEmpty() ? n : Build.MODEL;
         }
 
         @JavascriptInterface public void keepAwake(boolean on) {

@@ -52,7 +52,7 @@ const WBIN = app.isPackaged ? [path.join(process.resourcesPath, 'whisper')]
 const EXE = process.platform === 'win32' ? '.exe' : '';
 const WHISPER = process.env.VOICE_WHISPER || WBIN.map(d => path.join(d, 'whisper-cli' + EXE)).find(p => fs.existsSync(p));
 const WSERVER = WBIN.map(d => path.join(d, 'whisper-server' + EXE)).find(p => fs.existsSync(p));
-// the GTK app's model files (it downloads them); same folders it uses
+// the model files the download manager below fetches
 // q8_0 first: the same text as the full model, ~20% faster on this CPU (whisper-quantize makes it)
 const WFILES = { small: ['ggml-small-q8_0.bin', 'ggml-small.bin'], medium: ['ggml-medium-q8_0.bin', 'ggml-medium.bin'], large: ['ggml-large-v3-q5_0.bin'] };
 const wmodel = key => (WFILES[key] || []).map(modelFile).find(Boolean);
@@ -124,7 +124,7 @@ const runCli = (m, wavBytes, translate, lang) => new Promise((resolve, reject) =
 });
 
 // ---- offline models: downloaded into userData/models (the download manager below); a source checkout's
-// ../models and the GTK app's folder count too, so nothing is fetched twice on a developer machine ----
+// ../models and the old GTK app's ~/.local/share/voice count too, so nothing is fetched twice ----
 const { MODEL_URL, MODEL_PACKS } = require(path.join(WEB, 'voxtral.js'));
 const { fetchResumable } = require('./download.js');
 const MODELS_HOME = path.join(app.getPath('userData'), 'models');
@@ -216,6 +216,50 @@ ipcMain.handle('sys:start', e => {
 });
 ipcMain.handle('sys:stop', () => { if (parec) parec.kill(); parec = null; });
 
+// ---- Wi-Fi mics: phones/tablets running VOICE POST 16 kHz mono s16le here; the page mixes them (AutoMixer) ----
+const WIFI_PORT = 8790;
+let wifi = null, wifiTo = null, wifiCode = '';
+// the Wi-Fi/Ethernet addresses a phone can reach; Docker/VM bridges would only confuse the teacher
+const wifiAddrs = () => Object.entries(os.networkInterfaces())
+  .filter(([n]) => !/^(docker|br-|veth|virbr|vmnet|vboxnet|lxc|lxdbr|tailscale|zt|wg)/i.test(n))
+  .sort(([a], [b]) => /^(wl|wi-?fi)/i.test(b) - /^(wl|wi-?fi)/i.test(a)) // Wi-Fi first: the phone tries them in order
+  .flatMap(([, a]) => a).filter(a => a.family === 'IPv4' && !a.internal).map(a => a.address);
+// the network the phones must join, shown above the QR code; '' when unknown (cable, no NetworkManager)
+// async: the first nmcli call can take seconds while NetworkManager wakes up, and must not freeze the window
+const output = (cmd, args, env) => new Promise(ok => require('child_process').execFile(cmd, args, { encoding: 'utf8', timeout: 5000, env }, (err, out) => ok(err ? '' : out)));
+async function wifiName() {
+  if (process.platform === 'win32') return (/^\s*SSID\s*:\s*(.+)$/m.exec(await output('netsh', ['wlan', 'show', 'interfaces'])) || [])[1]?.trim() || '';
+  // LC_ALL=C: in a Greek session the column says «ναι», not yes
+  const line = (await output('nmcli', ['-t', '-f', 'active,ssid', 'dev', 'wifi', 'list', '--rescan', 'no'], { ...process.env, LC_ALL: 'C' })).split('\n').find(l => l.startsWith('yes:'));
+  return line ? line.slice(4).replace(/\\:/g, ':') : '';
+}
+const wifiInfo = async () => ({ addrs: wifiAddrs(), port: WIFI_PORT, ssid: await wifiName(), pc: os.hostname() });
+ipcMain.handle('wifi:start', (e, code) => {
+  wifiTo = e.sender;
+  wifiCode = String(code);
+  if (wifi) return wifiInfo();
+  wifi = require('http').createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    if (req.method !== 'POST' || u.pathname !== '/mic') return res.end('VOICE');
+    // anyone on the school network can reach this port: only devices that know the code shown on screen get in
+    if (req.headers['x-voice-code'] !== wifiCode) { res.statusCode = 403; return res.end(); }
+    const parts = [];
+    let size = 0;
+    req.on('data', d => { size += d.length; if (size > 1 << 20) req.destroy(); else parts.push(d); });
+    req.on('end', () => {
+      let d = Buffer.concat(parts);
+      if (d.length % 2) d = d.subarray(0, d.length - 1);
+      const id = (u.searchParams.get('id') || '').slice(0, 40), name = (u.searchParams.get('name') || '').slice(0, 40);
+      if (id && d.length && wifiTo && !wifiTo.isDestroyed()) wifiTo.send('wifi:pcm', id, name, d);
+      res.end('OK');
+    });
+  });
+  return new Promise((resolve, reject) => {
+    wifi.once('error', err => { wifi = null; reject(err.code === 'EADDRINUSE' ? new Error(`η θύρα ${WIFI_PORT} είναι πιασμένη`) : err); });
+    wifi.listen(WIFI_PORT, () => resolve(wifiInfo()));
+  });
+});
+
 // ---- mini window: a small always-on-top bar that types dictation into whatever app has focus ----
 let mainWin = null, mini = null;
 ipcMain.handle('mini:open', () => {
@@ -247,7 +291,7 @@ async function sendPaste() {
   const xdo = () => has('xdotool') && run('xdotool', ['key', '--clearmodifiers', 'ctrl+v']);
   return process.env.WAYLAND_DISPLAY ? (await ydo()) || xdo() : (await xdo()) || ydo();
 }
-// No clipboard watching here, ever: polling wl-paste broke menus desktop-wide in the GTK app.
+// No clipboard watching here, ever: polling wl-paste broke menus desktop-wide in the old GTK app.
 ipcMain.handle('type', async (_e, text) => {
   clipboard.writeText(text);
   // a focused VOICE window would receive the paste and show the text twice
