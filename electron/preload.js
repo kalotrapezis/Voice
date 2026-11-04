@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('voiceElectron', {
   piper: () => ipcRenderer.invoke('tts:piper'),
   whisperReady: () => ipcRenderer.invoke('stt:ready'),
   whisper: (wav, opts) => ipcRenderer.invoke('stt:run', wav, opts),
+  whisperWarm: (wav, opts) => ipcRenderer.invoke('stt:warm', wav, opts),
   mms: text => ipcRenderer.invoke('mms:synth', text),
   models: {
     status: () => ipcRenderer.invoke('models:status'),

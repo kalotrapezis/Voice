@@ -74,7 +74,9 @@ function server(m) {
   if (wsrv) wsrv.proc.kill();
   const port = 18790 + Math.floor(Math.random() * 1000);
   const args = [WSERVER, '-m', m, '-t', String(THREADS), '--host', '127.0.0.1', '--port', String(port)];
-  const proc = process.platform === 'win32' ? spawn(args[0], args.slice(1)) : spawn('nice', ['-n', '10', ...args]);
+  // stderr read, not left to fill its pipe (a full pipe stalls the server); it also says whether a GPU took the model
+  const opts = { stdio: ['ignore', 'ignore', 'pipe'] };
+  const proc = process.platform === 'win32' ? spawn(args[0], args.slice(1), opts) : spawn('nice', ['-n', '10', ...args], opts);
   proc.on('error', () => {});
   const ready = (async () => {
     for (let i = 0; i < 120 && proc.exitCode === null && proc.signalCode === null; i++) {
@@ -82,28 +84,49 @@ function server(m) {
     }
     throw new Error('whisper-server did not start');
   })();
-  wsrv = { model: m, port, ready, proc, exited: false };
+  wsrv = { model: m, port, ready, proc, exited: false, gpu: false };
+  const me = wsrv;
+  proc.stderr.on('data', d => { if (/using (?!CPU)\S+ backend/.test(d)) me.gpu = true; });
   proc.on('exit', () => { wsrv && wsrv.proc === proc && (wsrv.exited = true); });
   return wsrv;
 }
 app.on('will-quit', () => { if (wsrv) wsrv.proc.kill(); });
 
+const infer = (s, wavBytes, fields) => {
+  const f = new FormData();
+  f.append('file', new Blob([wavBytes], { type: 'audio/wav' }), 'a.wav');
+  for (const [k, v] of Object.entries({ ...fields, temperature: 0, response_format: 'json' })) f.append(k, String(v));
+  return fetch(`http://127.0.0.1:${s.port}/inference`, { method: 'POST', body: f });
+};
+let sttWaiting = 0; // phrases on their way to the server: warm-up never queues ahead of one
+
 // translate: whisper's own task, speech in any language → English text only
 ipcMain.handle('stt:run', async (_e, wavBytes, { translate = false, lang = 'el', model = 'medium' } = {}) => {
   const m = process.env.WHISPER_MODEL || wmodel(model) || wmodel('medium') || wmodel('small');
   if (WSERVER) {
+    sttWaiting++;
     try {
       const s = server(m);
       await s.ready;
-      const f = new FormData();
-      f.append('file', new Blob([wavBytes], { type: 'audio/wav' }), 'a.wav');
-      for (const [k, v] of Object.entries({ language: lang, translate, audio_ctx: audioCtx(wavBytes.byteLength), temperature: 0, response_format: 'json' }))
-        f.append(k, String(v));
-      const r = await fetch(`http://127.0.0.1:${s.port}/inference`, { method: 'POST', body: f });
+      const r = await infer(s, wavBytes, { language: lang, translate, audio_ctx: audioCtx(wavBytes.byteLength) });
       if (r.ok) return cleanText((await r.json()).text || '');
-    } catch { /* fall back to one whisper-cli run below */ }
+    } catch { /* fall back to one whisper-cli run below */ } finally { sttWaiting--; }
   }
   return runCli(m, wavBytes, translate, lang);
+});
+
+// this AMD iGPU (Renoir) boosts its clock only after ~4 s of steady work, so a lone phrase ran at a third of it
+// (2.4 s instead of 1.4 s): while someone speaks, the page sends the last second of their voice to keep the GPU busy.
+// Language detection only: the encoder (the GPU's work) and one decoder step, ~1 s every time. Transcribing the
+// snippet instead sometimes looped on the same words for 4–5 s, and the next phrase waited behind it.
+ipcMain.handle('stt:warm', async (_e, wavBytes, { model = 'medium' } = {}) => {
+  const m = process.env.WHISPER_MODEL || wmodel(model) || wmodel('medium') || wmodel('small');
+  if (!WSERVER || !m || sttWaiting) return;
+  const s = server(m); // the first word of a lesson also starts the server and loads the model
+  try {
+    await s.ready;
+    if (s.gpu && !sttWaiting) await (await infer(s, wavBytes, { detect_language: true })).text();
+  } catch { /* warm-up only */ }
 });
 
 const runCli = (m, wavBytes, translate, lang) => new Promise((resolve, reject) => {

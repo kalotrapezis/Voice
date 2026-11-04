@@ -22,7 +22,7 @@ const host = (() => {
     startSystem: onPcm => E.startSystem(onPcm), stopSystem: () => E.stopSystem(),
     wifiStart: (code, onPcm) => E.wifiStart(code, onPcm),
     piper: () => E.piper(), synth: (t, rate) => E.synth(t, rate),
-    whisperReady: () => E.whisperReady(), whisper: (wav, tr) => E.whisper(wav, tr),
+    whisperReady: () => E.whisperReady(), whisper: (wav, tr) => E.whisper(wav, tr), whisperWarm: (wav, o) => E.whisperWarm(wav, o),
     mms: t => E.mms(t), models: E.models,
     openMini: () => E.openMini(), closeMini: () => E.closeMini(), type: t => E.type(t),
   };
@@ -202,6 +202,13 @@ class Track {
       let o = 0;
       for (; o + FRAME <= buf.length; o += FRAME) this.vad.push(buf.subarray(o, o + FRAME));
       this.rest = buf.slice(o);
+      // still talking: one warm-up at a time on the last second of voice (see stt:warm in main.js); none once the
+      // voice drops, so the phrase that follows rarely waits behind one
+      const v = this.vad;
+      if (this.warm && !this.warming && v.inSpeech && v.silence < 3 && v.seg.length >= 33) {
+        this.warming = true;
+        this.warm(concat(v.seg.slice(-33))).finally(() => { this.warming = false; });
+      }
       return;
     }
     this.parts.push(pcm);
@@ -281,16 +288,19 @@ async function toggleRec(mode) {
   });
   if (mode === 'meeting') setLines([]);
   const submit = (pcm, sec, who) => enqueue(mode, pcm, sec, who);
+  const warm = offline && host.whisperWarm ? pcm => host.whisperWarm(wav(pcm), { model: rec.opts.wmodel }) : null;
   try {
     if (src !== 'system') {
       // the teleprompt wants words fast (short VAD phrases, not 25 s chunks); so does the mini bar, which types each one
       const t = new Track(both ? 'Εγώ' : '', both || mode === 'prompt' || MINI, rec.diarize, submit);
+      t.warm = warm;
       rec.tracks.push(t);
       // while the pupil's message is read aloud the mic would caption the tablet's own voice
       rec.closers.push(await openRoomMic(p => { if (!speech.on && !rec.paused) t.push(p); level(p); }));
     }
     if (src === 'system' || both) {
       const t = new Track(both ? 'Ηχεία' : '', mode === 'prompt', rec.diarize, submit);
+      t.warm = warm;
       rec.tracks.push(t);
       rec.closers.push(await openSystem(p => { if (!rec.paused) t.push(p); if (!both) level(p); }));
     }
