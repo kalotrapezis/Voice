@@ -43,7 +43,7 @@ ipcMain.handle('tts:synth', (_e, text, rate) => new Promise((resolve, reject) =>
   p.stdin.end(text);
 }));
 
-// ---- offline speech-to-text: the repo's whisper.cpp with the medium model (small if medium is missing) ----
+// ---- offline speech-to-text: the repo's whisper.cpp with large-v3-turbo (medium, then small, if it is missing) ----
 // build-vulkan (the AMD/Intel GPU through Vulkan) first: the encoder runs ~2.7× faster there
 // packaged: the portable build (tools/build-whisper-portable.sh) in resources/whisper
 const WBIN = app.isPackaged ? [path.join(process.resourcesPath, 'whisper')]
@@ -54,41 +54,64 @@ const WHISPER = process.env.VOICE_WHISPER || WBIN.map(d => path.join(d, 'whisper
 const WSERVER = WBIN.map(d => path.join(d, 'whisper-server' + EXE)).find(p => fs.existsSync(p));
 // the model files the download manager below fetches
 // q8_0 first: the same text as the full model, ~20% faster on this CPU (whisper-quantize makes it)
-const WFILES = { small: ['ggml-small-q8_0.bin', 'ggml-small.bin'], medium: ['ggml-medium-q8_0.bin', 'ggml-medium.bin'], large: ['ggml-large-v3-q5_0.bin'] };
+const WFILES = { turbo: ['ggml-large-v3-turbo-q5_0.bin'], small: ['ggml-small-q8_0.bin', 'ggml-small.bin'],
+  medium: ['ggml-medium-q8_0.bin', 'ggml-medium.bin'], large: ['ggml-large-v3-q5_0.bin'] };
 const wmodel = key => (WFILES[key] || []).map(modelFile).find(Boolean);
+// turbo was never taught whisper's translate task (it writes the Greek again), so English output stays with medium
+const pickModel = (model, translate) => process.env.WHISPER_MODEL
+  || (translate && model === 'turbo' && (wmodel('medium') || wmodel('small'))) || wmodel(model) || ['turbo', 'medium', 'small'].map(wmodel).find(Boolean);
 const THREADS = Math.max(4, Math.min(os.cpus().length - 2, 12));
 // installed model keys, best first; [] when whisper.cpp itself is missing
-ipcMain.handle('stt:ready', () => WHISPER ? ['medium', 'small', 'large'].filter(wmodel) : []);
+ipcMain.handle('stt:ready', () => WHISPER ? ['turbo', 'medium', 'small', 'large'].filter(wmodel) : []);
 // drop non-speech markers like [BLANK_AUDIO] or (μουσική), as clean_transcript does
 const cleanText = out => {
   const text = out.replace(/\[[^\]]*\]|\([^)]*\)|\*[^*]*\*/g, ' ').replace(/\s+/g, ' ').trim();
   return /\p{L}|\d/u.test(text) ? text : '';
 };
-// the encoder always runs on a 30 s window; shrinking it to the clip (never under ~15 s, shorter invents words) is faster
-const audioCtx = bytes => Math.min(1500, Math.max(768, Math.round((bytes - 44) / 32000 * 50) + 100));
+// the encoder always runs on a 30 s window; shrinking it to the clip (never under ~15 s, shorter invents words) is faster.
+// Multiples of 256 only: whisper.cpp pads the window to one, and before its fix of 29 Oct 2026 (#4127, in none of the
+// builds we ship) attention also read that padding (FLEURS Greek, turbo: 28% → 15% wrong words; medium 26% → 22%)
+const audioCtx = bytes => {
+  const n = Math.round((bytes - 44) / 32000 * 50), c = Math.ceil(Math.max(768, n + 100) / 256) * 256; // 50 frames a second
+  return c <= 1280 ? c : n <= 1280 ? 1280 : 1500; // a 25 s chunk fits 1280 (25.6 s); only longer audio takes the full 1500
+};
 
 // whisper-server keeps the model loaded: no ~1 s load per phrase, so phrases come back in ~1–1.5 s on the GPU
 let wsrv = null; // { model, port, ready: Promise, proc }
+// whisper takes the first GPU Vulkan lists, on a laptop often the built-in one beside an NVIDIA/AMD card:
+// the server's log names every GPU (uma: 1 = built-in), so the first start picks the dedicated one and restarts once
+let gpuDev = null;
 function server(m) {
   if (wsrv && wsrv.model === m && !wsrv.exited) return wsrv;
   if (wsrv) wsrv.proc.kill();
-  const port = 18790 + Math.floor(Math.random() * 1000);
-  const args = [WSERVER, '-m', m, '-t', String(THREADS), '--host', '127.0.0.1', '--port', String(port)];
-  // stderr read, not left to fill its pipe (a full pipe stalls the server); it also says whether a GPU took the model
-  const opts = { stdio: ['ignore', 'ignore', 'pipe'] };
-  const proc = process.platform === 'win32' ? spawn(args[0], args.slice(1), opts) : spawn('nice', ['-n', '10', ...args], opts);
-  proc.on('error', () => {});
-  const ready = (async () => {
-    for (let i = 0; i < 120 && proc.exitCode === null && proc.signalCode === null; i++) {
-      try { await fetch(`http://127.0.0.1:${port}/`); return; } catch { await new Promise(r => setTimeout(r, 250)); }
+  const me = wsrv = { model: m, port: 18790 + Math.floor(Math.random() * 1000), proc: null, exited: false, gpu: false };
+  const start = () => {
+    const args = [WSERVER, '-m', m, '-t', String(THREADS), '--host', '127.0.0.1', '--port', String(me.port),
+      ...(gpuDev ? ['-dev', String(gpuDev)] : [])];
+    // stderr read, not left to fill its pipe (a full pipe stalls the server); it also says whether a GPU took the model
+    const opts = { stdio: ['ignore', 'ignore', 'pipe'] };
+    const proc = me.proc = process.platform === 'win32' ? spawn(args[0], args.slice(1), opts) : spawn('nice', ['-n', '10', ...args], opts);
+    proc.on('error', () => {});
+    let log = '';
+    proc.stderr.on('data', d => {
+      if (/using (?!CPU)\S+ backend/.test(d)) me.gpu = true;
+      if (gpuDev !== null) return;
+      log += d;
+      if (!/whisper_backend_init_gpu: (using|no GPU)/.test(log)) return;
+      const gpus = [...log.matchAll(/ggml_vulkan: (\d+) = .*\| uma: (\d)/g)];
+      gpuDev = Number((gpus.find(g => g[2] === '0') || [0, 0])[1]);
+      if (gpuDev) { proc.removeAllListeners('exit'); proc.kill(); start(); } // same port: the ready loop below keeps waiting
+    });
+    proc.on('exit', () => { me.exited = true; });
+  };
+  start();
+  me.ready = (async () => {
+    for (let i = 0; i < 160 && !me.exited; i++) {
+      try { await fetch(`http://127.0.0.1:${me.port}/`); return; } catch { await new Promise(r => setTimeout(r, 250)); }
     }
     throw new Error('whisper-server did not start');
   })();
-  wsrv = { model: m, port, ready, proc, exited: false, gpu: false };
-  const me = wsrv;
-  proc.stderr.on('data', d => { if (/using (?!CPU)\S+ backend/.test(d)) me.gpu = true; });
-  proc.on('exit', () => { wsrv && wsrv.proc === proc && (wsrv.exited = true); });
-  return wsrv;
+  return me;
 }
 app.on('will-quit', () => { if (wsrv) wsrv.proc.kill(); });
 
@@ -102,13 +125,15 @@ let sttWaiting = 0; // phrases on their way to the server: warm-up never queues 
 
 // translate: whisper's own task, speech in any language → English text only
 ipcMain.handle('stt:run', async (_e, wavBytes, { translate = false, lang = 'el', model = 'medium' } = {}) => {
-  const m = process.env.WHISPER_MODEL || wmodel(model) || wmodel('medium') || wmodel('small');
+  const m = pickModel(model, translate);
   if (WSERVER) {
     sttWaiting++;
     try {
       const s = server(m);
       await s.ready;
-      const r = await infer(s, wavBytes, { language: lang, translate, audio_ctx: audioCtx(wavBytes.byteLength) });
+      // no_timestamps as -nt below: with timestamps the server cut its text every 60 characters, mid-word ("ουραν ό"),
+      // and cost accuracy (FLEURS Greek, medium: 33% → 26% wrong words)
+      const r = await infer(s, wavBytes, { language: lang, translate, no_timestamps: true, audio_ctx: audioCtx(wavBytes.byteLength) });
       if (r.ok) return cleanText((await r.json()).text || '');
     } catch { /* fall back to one whisper-cli run below */ } finally { sttWaiting--; }
   }
@@ -119,8 +144,8 @@ ipcMain.handle('stt:run', async (_e, wavBytes, { translate = false, lang = 'el',
 // (2.4 s instead of 1.4 s): while someone speaks, the page sends the last second of their voice to keep the GPU busy.
 // Language detection only: the encoder (the GPU's work) and one decoder step, ~1 s every time. Transcribing the
 // snippet instead sometimes looped on the same words for 4–5 s, and the next phrase waited behind it.
-ipcMain.handle('stt:warm', async (_e, wavBytes, { model = 'medium' } = {}) => {
-  const m = process.env.WHISPER_MODEL || wmodel(model) || wmodel('medium') || wmodel('small');
+ipcMain.handle('stt:warm', async (_e, wavBytes, { model = 'medium', translate = false } = {}) => {
+  const m = pickModel(model, translate);
   if (!WSERVER || !m || sttWaiting) return;
   const s = server(m); // the first word of a lesson also starts the server and loads the model
   try {
@@ -133,7 +158,8 @@ const runCli = (m, wavBytes, translate, lang) => new Promise((resolve, reject) =
   const f = path.join(os.tmpdir(), `voice-stt-${process.pid}-${synthN++}.wav`);
   fs.writeFileSync(f, Buffer.from(wavBytes));
   const ctx = audioCtx(wavBytes.byteLength);
-  const args = ['-n', '10', WHISPER, '-m', m, '-f', f, '-l', lang, '-t', String(THREADS), '-ac', String(ctx), '-nt', '-np'];
+  const args = ['-n', '10', WHISPER, '-m', m, '-f', f, '-l', lang, '-t', String(THREADS), '-ac', String(ctx), '-nt', '-np',
+    ...(gpuDev ? ['-dev', String(gpuDev)] : [])];
   if (translate) args.push('-tr');
   const p = spawn(process.platform === 'win32' ? WHISPER : 'nice', process.platform === 'win32' ? args.slice(2) : args);
   let out = '';

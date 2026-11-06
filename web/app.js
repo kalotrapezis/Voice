@@ -288,7 +288,7 @@ async function toggleRec(mode) {
   });
   if (mode === 'meeting') setLines([]);
   const submit = (pcm, sec, who) => enqueue(mode, pcm, sec, who);
-  const warm = offline && host.whisperWarm ? pcm => host.whisperWarm(wav(pcm), { model: rec.opts.wmodel }) : null;
+  const warm = offline && host.whisperWarm ? pcm => host.whisperWarm(wav(pcm), { model: rec.opts.wmodel, translate: mode === 'prompt' && prompt.whisperEnglish() }) : null;
   try {
     if (src !== 'system') {
       // the teleprompt wants words fast (short VAD phrases, not 25 s chunks); so does the mini bar, which types each one
@@ -725,7 +725,7 @@ if (host.models) {
     modelState[p.id] = { ...modelState[p.id], ...p };
     if (p.state !== 'down') refreshModels(); else paintModelList();
   });
-  $('#downloadAll').onclick = () => MODEL_PACKS.forEach(p => { if (!modelState[p.id]?.ready && modelState[p.id]?.state !== 'down') host.models.download(p.id); });
+  $('#downloadAll').onclick = () => MODEL_PACKS.forEach(p => { if (!p.extra && !modelState[p.id]?.ready && modelState[p.id]?.state !== 'down') host.models.download(p.id); });
   refreshModels();
 } else {
   $('#modelsGroup').remove(); $('#modelsCard').remove();
@@ -737,8 +737,8 @@ async function welcome() {
   if (MINI || prefs.get('welcomed', '') || !host.models) return;
   if (await apiKey('mistral') || await apiKey('openai')) return prefs.set('welcomed', '1');
   const status = await host.models.status();
-  if (status.every(s => s.ready)) return prefs.set('welcomed', '1');
-  const total = MODEL_PACKS.reduce((n, p) => n + packSize(p), 0);
+  if (status.every(s => s.ready || MODEL_PACKS.find(p => p.id === s.id).extra)) return prefs.set('welcomed', '1');
+  const total = MODEL_PACKS.reduce((n, p) => n + (p.extra ? 0 : packSize(p)), 0);
   $('#welcomeSize').textContent = fmtMB(total);
   $('#welcome').hidden = false;
   const done = () => { prefs.set('welcomed', '1'); $('#welcome').hidden = true; show('settings'); };

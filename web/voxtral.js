@@ -8,7 +8,7 @@ const CUT_WINDOW = 5 * SR;        // cut on the quietest frame of the chunk's la
 // both speak the same REST shape; each needs its own key from its own console
 const PROVIDERS = {
   // on this device: whisper.cpp on the desktop (models listed by main.js), Android's own recognizer on a tablet
-  local: { name: 'Τοπικά', models: [['medium', 'Whisper Medium'], ['small', 'Whisper Small'], ['large', 'Whisper Large v3']] },
+  local: { name: 'Τοπικά', models: [['turbo', 'Whisper Large v3 Turbo'], ['medium', 'Whisper Medium'], ['small', 'Whisper Small'], ['large', 'Whisper Large v3']] },
   mistral: { name: 'Mistral', api: 'https://api.mistral.ai/v1', chat: 'mistral-small-latest', console: 'console.mistral.ai → API Keys',
     models: [['voxtral-mini-transcribe-3', 'Voxtral Mini'], ['voxtral-small-transcribe-3', 'Voxtral Small']] },
   openai: { name: 'OpenAI', api: 'https://api.openai.com/v1', chat: 'gpt-4o-mini', console: 'platform.openai.com → API keys',
@@ -77,8 +77,13 @@ function terms(text) {
 // its 42 MB ship inside every package.
 const MODEL_URL = 'https://github.com/kalotrapezis/voice-models/releases/download/v1/';
 const MODEL_PACKS = [
-  { id: 'whisper', name: 'Αναγνώριση ομιλίας: Whisper Medium', note: 'Γράφει ό,τι λέτε, χωρίς internet. Με κάρτα γραφικών ~1–2 s ανά φράση.',
+  // turbo: FLEURS Greek 14% wrong words against medium's 20%, at the same speed and 250 MB smaller (scratch benchmark, Nov 2026)
+  { id: 'turbo', name: 'Αναγνώριση ομιλίας: Whisper Large v3 Turbo', note: 'Γράφει ό,τι λέτε, χωρίς internet. Με κάρτα γραφικών ~1–2 s ανά φράση.',
     // the same file whisper.cpp publishes, pinned to a commit: a second source while ours is missing or down
+    files: [{ path: 'ggml-large-v3-turbo-q5_0.bin', size: 574041195, sha256: '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2',
+      mirror: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin' }] },
+  // extra: not in "download all"; only whisper's own Greek → English needs it, and the Firefox models do that better
+  { id: 'whisper', extra: true, name: 'Αναγνώριση ομιλίας: Whisper Medium (προαιρετικό)', note: 'Το προηγούμενο μοντέλο: περισσότερα λάθη, αλλά μεταφράζει και μόνο του στα Αγγλικά.',
     files: [{ path: 'ggml-medium-q8_0.bin', size: 823369779, sha256: '42a1ffcbe4167d224232443396968db4d02d4e8e87e213d3ee2e03095dea6502',
       mirror: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium-q8_0.bin' }] },
   { id: 'voice', name: 'Ελληνική φωνή: Meta MMS', note: 'Διαβάζει κείμενα φωναχτά, χωρίς internet. Άδεια μόνο για μη εμπορική χρήση.',
