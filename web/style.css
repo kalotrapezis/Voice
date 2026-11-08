@@ -180,7 +180,26 @@ body.mini .rec { width: 50px; height: 50px; }
 body.mini .rec-info { min-width: 0; gap: 4px; }
 body.mini .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 #pauseBtn.on { background: var(--accent); color: var(--on-accent); }
-.settings-card h2 .usage { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--muted); text-align: right; }
+.settings-card h2 .usage { margin-left: auto; font: inherit; font-size: 12px; font-weight: 500; color: var(--muted); text-align: right; background: none; border: 0; cursor: pointer; padding: 4px; border-radius: 8px; }
+.settings-card h2 .usage:hover { background: var(--hover); color: var(--text); }
+/* Κόστος */
+.usage-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.usage-tiles div { background: var(--island-2); border-radius: 18px; padding: 12px 16px; display: grid; gap: 2px; }
+.usage-tiles small, .usage-budget small { color: var(--muted); font-size: 13px; }
+.usage-tiles strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.usage-track { display: block; height: 8px; border-radius: 4px; background: var(--island-2); overflow: hidden; }
+.usage-track span { display: block; height: 100%; border-radius: 4px; background: var(--ok); }
+.usage-track span.near { background: var(--wait); } .usage-track span.over { background: var(--rec); }
+.usage-budget { display: grid; gap: 6px; }
+.budget-field { width: 160px; }
+.usage-history { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.usage-history td { padding: 7px 4px; border-top: 1px solid var(--island-2); }
+.usage-history td:last-child { text-align: right; font-weight: 600; }
+.usage-history .muted, .usage-row .muted { color: var(--muted); }
+.usage-rows { display: grid; gap: 6px; }
+.usage-row { display: grid; grid-template-columns: minmax(120px, 1fr) 2fr 76px; gap: 12px; align-items: center; font-size: 14px; }
+.usage-row strong { font-variant-numeric: tabular-nums; text-align: right; }
+.usage-rows .usage-track span { background: var(--accent); }
 
 /* offline models list and the first-run choice */
 .model-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }

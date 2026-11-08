@@ -91,4 +91,29 @@ assert.strictEqual(sayNumber(100), 'εκατό');
 assert.strictEqual(sayNumber(3400), 'τρεις χιλιάδες τετρακόσια');
 assert.strictEqual(sayNumber(12345), 'ένα δύο τρία τέσσερα πέντε');
 assert.deepStrictEqual(mmsIds('Να', { 'ν': 5, 'α': 7, ' ': 1 }), [0, 1, 0, 1, 0, 5, 0, 7, 0, 1, 0, 1, 0]);
+
+// usage ledger: the old month total carries over; days, months and years add up, newest first, nothing dropped
+{
+  const log = v.usageLoad('', JSON.stringify({ month: '2026-10', mistral: { sec: 600, tokens: 1000, usd: 0.5 } }));
+  assert.deepStrictEqual(Object.keys(log.days), ['2026-10-01']);
+  const at = s => new Date(s + 'T12:00').getTime();
+  v.usageAdd(log, { p: 'mistral', f: 'captions', m: 'voxtral-mini-transcribe-3', s: 60, usd: 0.0035 }, at('2025-03-02'));
+  v.usageAdd(log, { p: 'mistral', f: 'captions', m: 'voxtral-mini-transcribe-3', s: 60, usd: 0.0035 }, at('2026-11-08'));
+  v.usageAdd(log, { p: 'mistral', f: 'read', m: 'voxtral-mini-tts-3', c: 1000, usd: 0.016 }, at('2026-11-08'));
+  v.usageAdd(log, { p: 'openai', f: 'translate', m: 'gpt-4o-mini', i: 100, usd: 0.001 }, at('2026-11-01'));
+  const u = v.usageSummary(JSON.parse(JSON.stringify(log)), at('2026-11-08'));  // survives the trip through localStorage
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} ≠ ${b}`);
+  near(u.today, 0.0195); near(u.month, 0.0205); near(u.all, 0.524);
+  assert.strictEqual(u.since, '2025-03-02');
+  assert.deepStrictEqual(u.history.days.map(d => d.key), ['2026-11-08', '2026-11-01', '2026-10-01', '2025-03-02']);
+  assert.deepStrictEqual(u.history.months.map(d => [d.key, d.n]), [['2026-11', 3], ['2026-10', 0], ['2025-03', 1]]);
+  assert.deepStrictEqual(u.history.years.map(d => d.key), ['2026', '2025']);
+  near(u.history.years[0].usd, 0.5205);
+  assert.deepStrictEqual(u.byFeature.map(r => r.key), ['before', 'read', 'captions', 'translate']);
+  assert.deepStrictEqual(u.byModel.map(r => r.key), ['voxtral-mini-tts-3', 'voxtral-mini-transcribe-3', 'gpt-4o-mini']); // the old total has no model
+  assert.deepStrictEqual(u.byProvider.map(r => r.key), ['mistral', 'openai']);
+  // a stored ledger wins over the old total; a broken one starts again from it
+  assert.strictEqual(Object.keys(v.usageLoad(JSON.stringify(log), '{}').days).length, 4);
+  assert.deepStrictEqual(v.usageLoad('{broken', '').days, {});
+}
 console.log('voxtral.js OK');

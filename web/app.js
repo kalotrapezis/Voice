@@ -98,6 +98,7 @@ function show(page) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   if (!MINI) prefs.set('page', page);
   if (page === 'read') ttsInfo();
+  if (page === 'usage') paintUsagePage();
   if (page === 'pcmic') pcmic?.enter(); else pcmic?.leave();
 }
 document.querySelectorAll('.nav-item').forEach(n => n.onclick = () => show(n.dataset.page));
@@ -796,24 +797,79 @@ $('#keyCheck').onclick = async () => {
 
 // the key card serves the chosen cloud; with "Τοπικά" it stays on the cloud used for translation
 const keyProvider = () => provider() !== 'local' ? provider() : prefs.get('keyProvider', 'mistral');
-// what this device spent this month, per provider (the providers' own consoles have the exact bill)
-const month = () => new Date().toISOString().slice(0, 7);
-function usage() {
-  try { const u = JSON.parse(prefs.get('usage', '{}')); return u.month === month() ? u : { month: month() }; } catch { return { month: month() }; }
-}
-meter.on = (p, sec, tokens, usd) => {
-  const u = usage(), x = u[p] || (u[p] = { sec: 0, tokens: 0, usd: 0 });
-  x.sec += sec; x.tokens += tokens; x.usd += usd;
-  prefs.set('usage', JSON.stringify(u));
+// what this device spends, kept for good (voxtral.js has the ledger; the providers' own consoles have the exact bill)
+const usageLog = () => usageLoad(prefs.get('usageLog', ''), prefs.get('usage', ''));
+const budget = () => +prefs.get('usageBudget', '') || null;
+// Mistral charges these list prices in € (as Tetra shows them)
+const money = usd => usd < 1 ? `€${usd.toFixed(4)}` : `€${usd.toFixed(2)}`;
+meter.on = e => {
+  const before = usageSummary(usageLog()).month, log = usageAdd(usageLog(), e), b = budget();
+  prefs.set('usageLog', JSON.stringify(log));
+  if (b && before < b && usageSummary(log).month >= b) toast(`Πέρασες το μηνιαίο όριο των ${money(b)}.`);
   paintUsage();
+  if ($('#usage').classList.contains('shown')) paintUsagePage();
 };
 function paintUsage() {
-  const x = usage()[keyProvider()] || { sec: 0, tokens: 0, usd: 0 };
   const m = ['Ιανουάριος', 'Φεβρουάριος', 'Μάρτιος', 'Απρίλιος', 'Μάιος', 'Ιούνιος', 'Ιούλιος', 'Αύγουστος',
     'Σεπτέμβριος', 'Οκτώβριος', 'Νοέμβριος', 'Δεκέμβριος'][new Date().getMonth()]; // Intl gives the genitive
-  $('#usage').textContent = `${m}: ${(x.sec / 60).toFixed(1)} λεπτά · ${Math.round(x.tokens).toLocaleString('el')} tokens · ≈ $${x.usd.toFixed(3)}`;
-  $('#usage').title = 'Μετρημένο σε αυτή τη συσκευή, με τις τιμές καταλόγου. Ο ακριβής λογαριασμός είναι στην κονσόλα της υπηρεσίας.';
+  $('#usageLink').textContent = `${m}: ≈ ${money(usageSummary(usageLog()).month)} ›`;
 }
+$('#usageLink').onclick = () => show('usage');
+
+const FEATURES = { captions: 'Υπότιτλοι', meeting: 'Σύσκεψη (ομιλητές)', translate: 'Μετάφραση', questions: 'Ερωτήσεις μαθητή',
+  read: 'Ανάγνωση', chat: 'Άλλο', before: 'Πριν από το ιστορικό' };
+const budgetField = $('#budgetField'), budgetSave = $('#budgetSave');
+let historyTab = 'days', historyAll = false, budgetSaved = false;
+// the typed budget, rounded to cents; null = no budget
+const typedBudget = () => { const n = Number(budgetField.value.replace(',', '.')); return n > 0 ? Math.round(n * 100) / 100 : null; };
+// Save only when it changes, and «Αποθηκεύτηκε ✓» after (Tetra, 8 Nov: "I pressed save and it still says save")
+function paintBudgetSave() {
+  const changed = typedBudget() !== budget();
+  budgetSave.disabled = !changed;
+  budgetSave.textContent = budgetSaved && !changed ? 'Αποθηκεύτηκε ✓' : 'Αποθήκευση';
+}
+budgetField.oninput = () => { budgetSaved = false; paintBudgetSave(); };
+budgetField.onkeydown = e => { if (e.key === 'Enter') budgetSave.click(); };
+budgetSave.onclick = () => {
+  if (budgetSave.disabled) return;
+  prefs.set('usageBudget', typedBudget() ?? '');
+  budgetSaved = true;
+  paintUsagePage();
+};
+function paintUsagePage() {
+  const u = usageSummary(usageLog()), b = budget();
+  const date = (k, o) => new Intl.DateTimeFormat('el', o).format(new Date(k.length === 4 ? k + '-07-01T12:00' : k.length === 7 ? k + '-15T12:00' : k + 'T12:00'));
+  $('#usageTiles').innerHTML = [['Σήμερα', u.today], ['Αυτόν τον μήνα', u.month], [`Από ${date(u.since, { day: 'numeric', month: 'short', year: 'numeric' })}`, u.all]]
+    .map(([l, x]) => `<div><small>${l}</small><strong>${money(x)}</strong></div>`).join('');
+  $('#usageBar').hidden = !b;
+  if (b) {
+    $('#usageBar small').textContent = `${money(u.month)} από ${money(b)} αυτόν τον μήνα`;
+    const bar = $('#usageBar span');
+    bar.style.width = Math.min(100, u.month / b * 100) + '%';
+    bar.className = u.month >= b ? 'over' : u.month >= 0.8 * b ? 'near' : '';
+  }
+  if (document.activeElement !== budgetField) budgetField.value = b ?? '';
+  paintBudgetSave();
+
+  const rows = u.history[historyTab], label = k => historyTab === 'years' ? k
+    : date(k, historyTab === 'months' ? { month: 'long', year: 'numeric' } : { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  $('#usageEmpty').hidden = !!rows.length;
+  $('#historyTable').innerHTML = (historyAll ? rows : rows.slice(0, 31))
+    .map(p => `<tr><td>${label(p.key)}</td><td class="muted">${p.n ? '× ' + p.n : ''}</td><td>${money(p.usd)}</td></tr>`).join('');
+  $('#historyMore').hidden = historyAll || rows.length <= 31;
+  $('#historyMore').textContent = `Άλλες ${rows.length - 31}`;
+  const breakdown = (el, list, name) => {
+    const max = Math.max(...list.map(r => r.usd), 1e-9);
+    el.innerHTML = list.slice(0, 10).map(r => `<div class="usage-row" title="${r.n} κλήσεις"><span>${name(r.key)}</span>` +
+      `<span class="usage-track"><span style="width:${r.usd / max * 100}%"></span></span><strong>${money(r.usd)}</strong></div>`).join('');
+  };
+  breakdown($('#byFeature'), u.byFeature, k => FEATURES[k] || k);
+  breakdown($('#byModel'), u.byModel, k => k);
+  breakdown($('#byProvider'), u.byProvider, k => (PROVIDERS[k] || { name: k }).name);
+  $('#byProviderBox').hidden = u.byProvider.length < 2;
+}
+segmented($('#historyPick'), [['days', 'Ημέρες'], ['months', 'Μήνες'], ['years', 'Χρόνια']], historyTab, v => { historyTab = v; historyAll = false; paintUsagePage(); });
+$('#historyMore').onclick = () => { historyAll = true; paintUsagePage(); };
 const perHour = id => PRICES[id] && PRICES[id].min ? ` · $${(PRICES[id].min * 60).toFixed(2)}/ώρα` : '';
 
 function paintEngine() {

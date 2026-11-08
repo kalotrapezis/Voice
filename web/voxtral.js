@@ -103,9 +103,57 @@ const cost = (model, sec, tin = 0, tout = 0, chars = 0) => {
   const p = PRICES[model] || {};
   return (p.min || 0) * sec / 60 + ((p.in || 0) * tin + (p.out || 0) * tout) / 1e6 + (p.char || 0) * chars;
 };
-// every paid call reports here; the page keeps the monthly total
+// every paid call reports here as { p (provider), f (feature), m (model), s, i, o, c, usd }; the page keeps the ledger
 const meter = { on: null };
-const used = (provider, model, sec, tin = 0, tout = 0) => { if (meter.on) meter.on(provider, sec, tin + tout, cost(model, sec, tin, tout)); };
+const used = (p, f, m, s, i = 0, o = 0, c = 0) => { if (meter.on) meter.on({ p, f, m, s, i, o, c, usd: cost(m, s, i, o, c) }); };
+
+/*
+ * The ledger of paid calls, Tetra's usage page in VOICE (8 Nov 2026: Tetra's is "fuller and correct"). Tetra writes a line a
+ * call to files; here it lives in localStorage (~5 MB) on desktop and Android alike, so it sums a day per provider|feature|model:
+ * { v: 1, days: { 'YYYY-MM-DD': { 'mistral|captions|voxtral-mini-transcribe-3': { n, usd, s, i, o, c } } } }. Nothing is dropped.
+ */
+const pad = n => String(n).padStart(2, '0');
+const dayKey = ms => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+/** The stored ledger, or (first run) a new one holding the old month total ({ month, mistral: { sec, tokens, usd } }) on its 1st. */
+function usageLoad(text, oldText) {
+  try { const l = JSON.parse(text); if (l && l.days) return l; } catch { /* none yet */ }
+  const log = { v: 1, days: {} };
+  try {
+    const old = JSON.parse(oldText);
+    for (const [p, x] of Object.entries(old)) if (p !== 'month' && x && x.usd > 0)
+      (log.days[old.month + '-01'] ||= {})[`${p}|before|`] = { n: 0, usd: x.usd, s: x.sec || 0, i: x.tokens || 0, o: 0, c: 0 };
+  } catch { /* no old total */ }
+  return log;
+}
+function usageAdd(log, e, t = Date.now()) {
+  const d = (log.days[dayKey(t)] ||= {}), k = `${e.p}|${e.f}|${e.m}`, x = d[k] || (d[k] = { n: 0, usd: 0, s: 0, i: 0, o: 0, c: 0 });
+  x.n++;
+  for (const f of ['usd', 's', 'i', 'o', 'c']) x[f] += +e[f] || 0;
+  return log;
+}
+/** Today, this month, all time; by feature, model and provider (costliest first); every day, month and year (newest first). */
+function usageSummary(log, now = Date.now()) {
+  const rows = Object.entries(log.days).flatMap(([day, d]) => Object.entries(d).map(([k, x]) => {
+    const [p, f, m] = k.split('|');
+    return { day, p, f, m, ...x };
+  }));
+  const sum = xs => xs.reduce((s, x) => s + x.usd, 0);
+  const group = (key, xs) => [...xs.reduce((g, x) => {
+    const k = key(x);
+    if (!k) return g;
+    const o = g.get(k) || { key: k, usd: 0, n: 0 };
+    o.usd += x.usd; o.n += x.n;
+    return g.set(k, o);
+  }, new Map()).values()];
+  const costly = xs => xs.sort((a, b) => b.usd - a.usd), newest = xs => xs.sort((a, b) => (a.key < b.key ? 1 : -1));
+  const today = dayKey(now), month = today.slice(0, 7);
+  return {
+    today: sum(rows.filter(x => x.day === today)), month: sum(rows.filter(x => x.day.startsWith(month))), all: sum(rows),
+    since: rows.reduce((m, x) => (x.day < m ? x.day : m), today),
+    byFeature: costly(group(x => x.f, rows)), byModel: costly(group(x => x.m, rows)), byProvider: costly(group(x => x.p, rows)),
+    history: { days: newest(group(x => x.day, rows)), months: newest(group(x => x.day.slice(0, 7), rows)), years: newest(group(x => x.day.slice(0, 4), rows)) },
+  };
+}
 
 async function transcribe(key, model, pcm, { diarize = false, bias = [], provider = 'mistral', lang = 'el' } = {}) {
   const f = new FormData();
@@ -124,7 +172,7 @@ async function transcribe(key, model, pcm, { diarize = false, bias = [], provide
   }
   if (r.status === 401) throw Object.assign(new Error('Λάθος κλειδί API — έλεγξέ το στις Ρυθμίσεις.'), { fatal: true });
   if (!r.ok) throw new Error(`Σφάλμα διακομιστή ${r.status}: ${(await r.text()).slice(0, 160)}`);
-  used(provider, model, pcm.length / SR);
+  used(provider, diarize ? 'meeting' : 'captions', model, pcm.length / SR);
   return r.json();
 }
 
@@ -147,12 +195,12 @@ async function translateAudio(key, pcm, lang) {
   if (r.status === 401) throw Object.assign(new Error('Λάθος κλειδί API — έλεγξέ το στις Ρυθμίσεις.'), { fatal: true });
   if (!r.ok) throw new Error(`Σφάλμα διακομιστή ${r.status}: ${(await r.text()).slice(0, 160)}`);
   const j = await r.json(), u = j.usage || {};
-  used('mistral', model, pcm.length / SR, u.prompt_tokens || 0, u.completion_tokens || 0);
+  used('mistral', 'translate', model, pcm.length / SR, u.prompt_tokens || 0, u.completion_tokens || 0);
   return (j.choices[0].message.content || '').trim();
 }
 
 /** One system + user turn through the provider's small chat model. */
-async function chat(key, provider, system, user, temperature = 0) {
+async function chat(key, provider, system, user, temperature = 0, feature = 'chat') {
   const p = PROVIDERS[provider];
   const r = await fetch(p.api + '/chat/completions', {
     method: 'POST',
@@ -161,13 +209,13 @@ async function chat(key, provider, system, user, temperature = 0) {
   });
   if (!r.ok) throw new Error(`${p.name} ${r.status}`);
   const j = await r.json(), u = j.usage || {};
-  used(provider, p.chat, 0, u.prompt_tokens || 0, u.completion_tokens || 0);
+  used(provider, feature, p.chat, 0, u.prompt_tokens || 0, u.completion_tokens || 0);
   return (j.choices[0].message.content || '').trim();
 }
 
 /** One caption phrase → `lang`. */
 const translate = (key, provider, text, lang) =>
-  chat(key, provider, `Translate the user's words, spoken in a classroom, into ${lang}. Reply with the translation only.`, text);
+  chat(key, provider, `Translate the user's words, spoken in a classroom, into ${lang}. Reply with the translation only.`, text, 0, 'translate');
 
 /** The last minutes of the lesson → up to 3 short questions a pupil could tap instead of typing. */
 async function suggestQuestions(key, provider, lesson) {
@@ -175,7 +223,7 @@ async function suggestQuestions(key, provider, lesson) {
     'Είσαι βοηθός μαθητή που δεν ακούει και γράφει αργά. Από τους υπότιτλους του μαθήματος, γράψε 3 πολύ σύντομες ερωτήσεις ' +
     '(έως 8 λέξεις η καθεμία) που θα μπορούσε να κάνει ο μαθητής στον δάσκαλο για να καταλάβει ή να συμμετάσχει: ' +
     'μία για κάτι που ίσως δεν κατάλαβε, μία για το τι πρέπει να κάνει, μία για το ίδιο το θέμα. ' +
-    'Ελληνικά, απλή γλώσσα, μία ερώτηση ανά γραμμή, χωρίς αρίθμηση ή άλλο κείμενο.', lesson, 0.4);
+    'Ελληνικά, απλή γλώσσα, μία ερώτηση ανά γραμμή, χωρίς αρίθμηση ή άλλο κείμενο.', lesson, 0.4, 'questions');
   return out.split('\n').map(l => l.replace(/^[-*\d.)\s]+/, '').trim()).filter(Boolean).slice(0, 3);
 }
 
@@ -207,7 +255,7 @@ async function synthesize(key, provider, text, voice) {
     throw new Error('Δεν υπάρχει σύνδεση στο διαδίκτυο.');
   }
   if (!r.ok) throw new Error(`${p.name} ${r.status}: ${(await r.text()).slice(0, 120)}`);
-  if (meter.on) meter.on(provider, 0, 0, cost(model, 0, 0, 0, text.length));
+  used(provider, 'read', model, 0, 0, 0, text.length);
   if (provider === 'openai') return r.arrayBuffer();
   return Uint8Array.from(atob((await r.json()).audio_data), c => c.charCodeAt(0)).buffer;
 }
@@ -356,5 +404,5 @@ function parsePair(text) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { MODEL_URL, MODEL_PACKS, PROVIDERS, PRICES, cost, SR, FRAME, CHUNK, CUT_WINDOW, rms, quietestCut, isSilent, concat, wav, stamp, terms, speakerLines, Vad, AutoMixer, pairText, parsePair, ttsChunks };
+  module.exports = { MODEL_URL, MODEL_PACKS, PROVIDERS, PRICES, cost, dayKey, usageLoad, usageAdd, usageSummary, SR, FRAME, CHUNK, CUT_WINDOW, rms, quietestCut, isSilent, concat, wav, stamp, terms, speakerLines, Vad, AutoMixer, pairText, parsePair, ttsChunks };
 }

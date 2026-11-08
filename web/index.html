@@ -15,7 +15,8 @@
       <button class="nav-item" data-page="prompt"><span data-icon="prompt"></span><span>Teleprompt</span></button>
       <button class="nav-item" data-page="read"><span data-icon="speaker"></span><span>Ανάγνωση</span></button>
       <button class="nav-item" data-page="pcmic"><span data-icon="phone"></span><span>Μικρόφωνο PC</span></button>
-      <button class="nav-item foot" data-page="settings"><span data-icon="settings"></span><span>Ρυθμίσεις</span></button>
+      <button class="nav-item foot" data-page="usage"><span data-icon="chart"></span><span>Κόστος</span></button>
+      <button class="nav-item" data-page="settings"><span data-icon="settings"></span><span>Ρυθμίσεις</span></button>
     </nav>
 
     <main class="content">
@@ -148,6 +149,33 @@
       </section>
 
       <!-- Ρυθμίσεις -->
+      <!-- Κόστος -->
+      <section class="page" id="usage">
+        <h1>Κόστος</h1>
+        <div class="settings-card island">
+          <div class="usage-tiles" id="usageTiles"></div>
+          <div class="usage-budget" id="usageBar" hidden><small></small><div class="usage-track"><span></span></div></div>
+          <label class="hint" for="budgetField">Μηνιαίο όριο (€)</label>
+          <div class="actions">
+            <input id="budgetField" class="field budget-field" inputmode="decimal" placeholder="χωρίς όριο">
+            <button class="pill-button primary" id="budgetSave" disabled>Αποθήκευση</button>
+          </div>
+          <p class="hint">Όταν ο μήνας το περάσει, βγαίνει ειδοποίηση· η εφαρμογή δεν σταματά μόνη της.</p>
+        </div>
+        <div class="settings-card island">
+          <h2>Ιστορικό</h2>
+          <div class="segmented" id="historyPick" role="radiogroup" aria-label="Ιστορικό ανά"></div>
+          <p class="hint" id="usageEmpty">Δεν έχει γίνει ακόμη καμία χρέωση από αυτή τη συσκευή.</p>
+          <table class="usage-history"><tbody id="historyTable"></tbody></table>
+          <div class="actions"><button class="pill-button" id="historyMore" hidden></button></div>
+        </div>
+        <div class="settings-card island">
+          <h2>Ανά λειτουργία</h2><div class="usage-rows" id="byFeature"></div>
+          <h2>Ανά μοντέλο</h2><div class="usage-rows" id="byModel"></div>
+          <div id="byProviderBox" hidden><h2>Ανά υπηρεσία</h2><div class="usage-rows" id="byProvider"></div></div>
+        </div>
+        <p class="hint">Μετρημένο σε αυτή τη συσκευή, με τις τιμές καταλόγου. Ο ακριβής λογαριασμός είναι στην κονσόλα της υπηρεσίας.</p>
+      </section>
       <section class="page" id="settings">
         <h1>Ρυθμίσεις</h1>
         <h2 class="group">Ήχος</h2>
@@ -180,7 +208,7 @@
           <div class="actions"><button class="pill-button" id="greekDownload" hidden>Λήψη ελληνικών για χρήση χωρίς internet</button></div>
         </div>
         <div class="settings-card island" id="keyCard">
-          <h2><span data-icon="key"></span><span id="keyTitle">Κλειδί API</span><span class="usage" id="usage"></span></h2>
+          <h2><span data-icon="key"></span><span id="keyTitle">Κλειδί API</span><button class="usage" id="usageLink" title="Τι ξοδεύτηκε, ανά ημέρα, μήνα και χρόνο"></button></h2>
           <p class="hint" id="keyWhere"></p>
           <input id="keyField" class="field" type="password" autocomplete="off" spellcheck="false">
           <div class="actions">
