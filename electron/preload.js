@@ -32,7 +32,7 @@ contextBridge.exposeInMainWorld('voiceElectron', {
   startSystem: cb => { onPcm = cb; return ipcRenderer.invoke('sys:start'); },
   stopSystem: () => { onPcm = null; return ipcRenderer.invoke('sys:stop'); },
   wifiStart: (code, cb) => { onWifi = cb; return ipcRenderer.invoke('wifi:start', code); },
-  openMini: () => ipcRenderer.invoke('mini:open'),
+  openMini: onTop => ipcRenderer.invoke('mini:open', onTop),
   closeMini: () => ipcRenderer.invoke('mini:close'),
   type: text => ipcRenderer.invoke('type', text),
   keepAwake: on => ipcRenderer.invoke('awake', on),

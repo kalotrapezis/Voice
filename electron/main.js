@@ -310,24 +310,47 @@ ipcMain.handle('wifi:start', (e, code) => {
 });
 
 // ---- mini window: a small always-on-top bar that types dictation into whatever app has focus ----
-let mainWin = null, mini = null;
-ipcMain.handle('mini:open', () => {
-  if (!mini) {
+let mainWin = null, mini = null, miniOpening = false;
+ipcMain.handle('mini:open', async (_e, onTop = true) => {
+  if (!mini && !miniOpening) {
+    miniOpening = true; // a double click must not open two bars while KWin is being asked
+    await kwinKeepAbove('VOICE mini', onTop).catch(() => {}); // before the window exists, so KWin sees it arrive
+    miniOpening = false;
     const { workArea: a } = screen.getPrimaryDisplay();
     mini = new BrowserWindow({
       width: 320, height: 76, x: a.x + a.width - 340, y: a.y + a.height - 100,
-      frame: false, resizable: false, alwaysOnTop: true, skipTaskbar: false, title: 'VOICE mini',
+      frame: false, resizable: false, alwaysOnTop: onTop, skipTaskbar: false, title: 'VOICE mini',
       // never take keyboard focus: the paste must land in the app the user is typing in
       focusable: false,
       backgroundColor: nativeTheme.shouldUseDarkColors ? '#121416' : '#eef0f1',
       webPreferences: { preload: path.join(__dirname, 'preload.js') },
     });
-    mini.setAlwaysOnTop(true, 'floating');
+    if (onTop) mini.setAlwaysOnTop(true, 'floating');
+    mini.on('page-title-updated', e => e.preventDefault()); // keepAbove below finds the bar by this title
     mini.loadFile(path.join(WEB, 'index.html'), { query: { mini: '1' } });
     mini.on('closed', () => { mini = null; if (mainWin && !mainWin.isDestroyed()) mainWin.show(); });
   }
   if (mainWin) mainWin.hide();
 });
+// KDE on Wayland ignores alwaysOnTop (Wayland has no such request), so ask KWin itself through its scripting API.
+// The script waits for the window to appear (running it after load raced the mapping), then stops listening.
+// Each load gets a new name: reloading under the same name returns the old, still-unloading script, which never runs.
+let kwinScript = null;
+async function kwinKeepAbove(title, on) {
+  if (process.platform !== 'linux' || !process.env.WAYLAND_DISPLAY || !/KDE/i.test(process.env.XDG_CURRENT_DESKTOP || '')) return;
+  const call = (obj, method, ...args) => output('gdbus', ['call', '--session', '--dest', 'org.kde.KWin', '--object-path', obj, '--method', 'org.kde.kwin.' + method, ...args]);
+  if (kwinScript) await call('/Scripting', 'Scripting.unloadScript', kwinScript);
+  kwinScript = null;
+  if (!on) return;
+  const js = path.join(app.getPath('userData'), 'keep-above.js');
+  fs.writeFileSync(js, `const T = ${JSON.stringify(title)};
+function f(w) { if (w.caption !== T) return false; w.keepAbove = true; try { workspace.windowAdded.disconnect(added); } catch (e) {} return true; }
+function added(w) { if (!f(w)) w.captionChanged.connect(() => f(w)); }
+if (!workspace.windowList().some(f)) workspace.windowAdded.connect(added);`);
+  kwinScript = 'voice-keep-above-' + Date.now();
+  const id = /\d+/.exec(await call('/Scripting', 'Scripting.loadScript', js, kwinScript))?.[0];
+  if (id) await call('/Scripting/Script' + id, 'Script.run');
+}
 ipcMain.handle('mini:close', () => { if (mini) mini.close(); });
 
 const has = cmd => { try { execFileSync('which', [cmd], { stdio: 'ignore' }); return true; } catch { return false; } };

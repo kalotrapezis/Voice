@@ -24,7 +24,7 @@ const host = (() => {
     piper: () => E.piper(), synth: (t, rate) => E.synth(t, rate),
     whisperReady: () => E.whisperReady(), whisper: (wav, tr) => E.whisper(wav, tr), whisperWarm: (wav, o) => E.whisperWarm(wav, o),
     mms: t => E.mms(t), models: E.models,
-    openMini: () => E.openMini(), closeMini: () => E.closeMini(), type: t => E.type(t),
+    openMini: t => E.openMini(t), closeMini: () => E.closeMini(), type: t => E.type(t),
   };
   if (A) return {
     system: null,
@@ -449,11 +449,15 @@ dict.addEventListener('blur', () => { caret = dict.selectionEnd; });
 dict.addEventListener('input', () => prefs.set('dictation', dict.value));
 
 async function insertDictation(text) {
-  if (MINI) {
+  if (MINI || pasteBox.checked) {
+    if (!MINI) insertLocal(text);
     // into the app that has focus; if VOICE itself has it, the text waits on the clipboard
     const typed = await host.type(text + ' ');
     return status('dictate', (typed ? '✓ ' : 'Στο πρόχειρο (Ctrl+V): ') + text);
   }
+  insertLocal(text);
+}
+function insertLocal(text) {
   const at = Math.min(caret ?? dict.value.length, dict.value.length);
   const before = dict.value.slice(0, at);
   const ins = (before && !/\s$/.test(before) ? ' ' : '') + text;
@@ -468,9 +472,15 @@ $('#dictClear').onclick = () => { dict.value = ''; caret = null; prefs.set('dict
 
 // ---------- mini window ----------
 
+const pasteBox = $('#pasteBox'), onTopBox = $('#onTopBox');
+pasteBox.checked = prefs.get('pasteFocused', '0') === '1';
+pasteBox.onchange = () => prefs.set('pasteFocused', pasteBox.checked ? '1' : '0');
+onTopBox.checked = prefs.get('miniOnTop', '1') === '1';
+onTopBox.onchange = () => prefs.set('miniOnTop', onTopBox.checked ? '1' : '0');
+
 if (host.openMini && !MINI) {
-  $('#miniBtn').hidden = $('#miniHint').hidden = false;
-  $('#miniBtn').onclick = () => { if (rec.mode) return toast('Σταμάτησε πρώτα την ηχογράφηση.'); host.openMini(); };
+  $('#miniBtn').hidden = $('#miniHint').hidden = $('#pasteRow').hidden = $('#onTopRow').hidden = false;
+  $('#miniBtn').onclick = () => { if (rec.mode) return toast('Σταμάτησε πρώτα την ηχογράφηση.'); host.openMini(onTopBox.checked); };
 }
 $('#expandBtn').onclick = async () => { if (rec.mode) await stopRec(); host.closeMini(); };
 $('#pauseBtn').onclick = () => {
