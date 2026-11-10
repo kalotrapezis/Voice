@@ -52,7 +52,6 @@
     },
     "win": {
       "icon": "build/icon.png",
-      "signAndEditExecutable": false,
       "files": [
         "!node_modules/onnxruntime-node/bin/napi-v*/linux/**"
       ],

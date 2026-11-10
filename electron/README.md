@@ -20,7 +20,7 @@ npm start
 - **Linux:** `npm run dist:linux` produces an AppImage and a .deb in `release/`.
 - **Windows:** `npm run dist:win` produces an installer and a portable `.exe` in `release/`.
   - On Windows, build it there with Node 22+, `npm install`, then `npm run dist:win`.
-  - From Linux it also builds (a portable exe was tested), but without wine the exe's icon and metadata are not set: `signAndEditExecutable: false`. For a full build use Windows, or install wine and remove that line.
+  - From Linux it builds with Wine, which sets the exe's icon and version details. Bottles' runner works without installing wine: put a `wine` (and `wine64`) symlink to `~/.var/app/com.usebottles.bottles/data/bottles/runners/soda-9.0-1/bin/wine` first on `PATH`, use your own `WINEPREFIX`, and run the build with `DISPLAY` and `WAYLAND_DISPLAY` unset (with a display, creating the Wine prefix hangs).
 
 `npm run copy-web` copies `../web` into `./web`, which is the folder that gets packaged. For development, `main.js` reads `../web` directly.
 
