@@ -18,9 +18,11 @@ const host = (() => {
   if (E) return {
     system: E.platform === 'win32' ? 'loopback' : E.platform === 'linux' ? 'pulse' : null,
     getKey: () => E.getKey(), setKey: k => E.setKey(k),
-    save: (text, name) => E.save(text, name), keepAwake: on => E.keepAwake(on),
+    save: (text, name) => E.save(text, name), keepAwake: on => E.keepAwake(on), pdf: (html, name) => E.pdf(html, name),
     startSystem: onPcm => E.startSystem(onPcm), stopSystem: () => E.stopSystem(),
     wifiStart: (code, onPcm) => E.wifiStart(code, onPcm),
+    rtStart: (o, cb) => E.rtStart(o, cb), rtAudio: pcm => E.rtAudio(pcm), rtStop: () => E.rtStop(),
+    capOpen: cb => E.capOpen(cb), capText: t => E.capText(t),
     piper: () => E.piper(), synth: (t, rate) => E.synth(t, rate),
     whisperReady: () => E.whisperReady(), whisper: (wav, tr) => E.whisper(wav, tr), whisperWarm: (wav, o) => E.whisperWarm(wav, o),
     mms: t => E.mms(t), models: E.models,
@@ -103,7 +105,7 @@ function show(page) {
 }
 document.querySelectorAll('.nav-item').forEach(n => n.onclick = () => show(n.dataset.page));
 
-// 'local' (whisper on the desktop, the device recognizer on Android), 'mistral' or 'openai'
+// 'local' (whisper on the desktop, the device recognizer on Android), 'mistral', 'openai' or 'elevenlabs'
 const provider = () => prefs.get('provider', host.listen ? 'local' : 'mistral');
 let whisperModels = [];
 // offline translation (local.js): Greek ↔ English only; the Android APK ships the models, the desktop says where they are
@@ -123,11 +125,13 @@ async function keys() {
   return raw ? { mistral: raw } : {};
 }
 const apiKey = async (p = provider()) => p === 'local' ? '' : (await keys())[p] || '';
-// translation needs a cloud even when speech runs locally: the chosen one, else whichever has a key
+// translation needs a cloud with a chat model even when speech runs locally (or on ElevenLabs): the chosen one, else whichever has a key
 async function cloud() {
-  const all = await keys(), p = provider() !== 'local' ? provider() : ['mistral', 'openai'].find(x => all[x]);
-  return p && all[p] ? { p, key: all[p] } : null;
+  const all = await keys(), p = [provider(), 'mistral', 'openai'].find(x => PROVIDERS[x].chat && all[x]);
+  return p ? { p, key: all[p] } : null;
 }
+// these two tell speakers apart (Ομιλητής 1, 2…)
+const DIARIZE = ['mistral', 'elevenlabs'];
 async function setApiKey(k) {
   const all = await keys();
   all[keyProvider()] = k;
@@ -251,6 +255,8 @@ function status(mode, text, error = false) {
 }
 
 function paintRec() {
+  const o = $('#outlineRec');
+  if (o) { o.textContent = rec.mode === 'prompt' ? 'Διακοπή μεταγραφής' : 'Έναρξη μεταγραφής'; o.disabled = rec.busy || (!!rec.mode && rec.mode !== 'prompt'); }
   for (const mode of ['dictate', 'meeting', 'prompt']) {
     const b = recBtn(mode), on = rec.mode === mode;
     b.innerHTML = icon(on ? 'stop' : 'mic', b.dataset.label ? 24 : 32) + (b.dataset.label ? `<span>${on ? 'Διακοπή' : b.dataset.label}</span>` : '');
@@ -284,10 +290,13 @@ async function toggleRec(mode) {
   const both = src === 'both';
   Object.assign(rec, {
     mode, tracks: [], closers: [], failed: false, paused: false,
-    diarize: mode === 'meeting' && !both && !offline && provider() === 'mistral' && prefs.get('diarize', '1') === '1',
-    opts: { key, offline, model: model(), wmodel: model('local'), provider: provider(), lang: lang(), bias: terms(prefs.get('terms', DEFAULT_TERMS)) },
+    diarize: mode === 'meeting' && !both && !offline && DIARIZE.includes(provider()) && prefs.get('diarize', '1') === '1',
+    opts: { key, offline, model: model(), wmodel: model('local'), provider: provider(), lang: lang(), bias: terms(prefs.get('lessonTerms', '') + ',' + prefs.get('terms', DEFAULT_TERMS)) },
   });
   if (mode === 'meeting') setLines([]);
+  // the teleprompt with Mistral or ElevenLabs on the desktop: one live stream instead of a request per phrase (falls back to phrases)
+  rec.live = mode === 'prompt' && !offline && DIARIZE.includes(rec.opts.provider) && !!host.rtStart && !prompt.cloudTarget() && !both
+    && await liveStart().catch(() => false);
   const submit = (pcm, sec, who) => enqueue(mode, pcm, sec, who);
   const warm = offline && host.whisperWarm ? pcm => host.whisperWarm(wav(pcm), { model: rec.opts.wmodel, translate: mode === 'prompt' && prompt.whisperEnglish() }) : null;
   try {
@@ -297,23 +306,92 @@ async function toggleRec(mode) {
       t.warm = warm;
       rec.tracks.push(t);
       // while the pupil's message is read aloud the mic would caption the tablet's own voice
-      rec.closers.push(await openRoomMic(p => { if (!speech.on && !rec.paused) t.push(p); level(p); }));
+      rec.closers.push(await openRoomMic(p => {
+        // the live stream gets silence while the pupil's message is read aloud, so it stays open
+        if (rec.live) liveAudio(speech.on || rec.paused ? new Int16Array(p.length) : p);
+        else if (!speech.on && !rec.paused) t.push(p);
+        level(p);
+      }));
     }
     if (src === 'system' || both) {
       const t = new Track(both ? 'Ηχεία' : '', mode === 'prompt', rec.diarize, submit);
       t.warm = warm;
       rec.tracks.push(t);
-      rec.closers.push(await openSystem(p => { if (!rec.paused) t.push(p); if (!both) level(p); }));
+      rec.closers.push(await openSystem(p => {
+        if (rec.live) liveAudio(rec.paused ? new Int16Array(p.length) : p);
+        else if (!rec.paused) t.push(p);
+        if (!both) level(p);
+      }));
     }
   } catch (e) {
     rec.closers.forEach(c => c());
+    if (rec.live) host.rtStop();
     rec.mode = null;
+    rec.live = false;
     status(mode, micError(e), true);
     return paintRec();
   }
   startClock(mode);
-  status(mode, (offline ? 'Τοπικά, χωρίς internet. ' : '') + 'Ηχογράφηση… ' + ({ meeting: 'Η μεταγραφή γράφεται ανά 25 δευτερόλεπτα.', prompt: 'Κάθε φράση εμφανίζεται μόλις τελειώσει.' }[mode] || 'Ξαναπάτησε όταν τελειώσεις.'));
+  status(mode, (offline ? 'Τοπικά, χωρίς internet. ' : '') + 'Ηχογράφηση… ' + ({ meeting: 'Η μεταγραφή γράφεται ανά 25 δευτερόλεπτα.',
+    prompt: rec.live ? 'Ζωντανά: οι λέξεις εμφανίζονται όσο μιλάς.' : 'Κάθε φράση εμφανίζεται μόλις τελειώσει.' }[mode] || 'Ξαναπάτησε όταν τελειώσεις.'));
   paintRec();
+}
+
+// ---------- live captions (desktop + Mistral or ElevenLabs): words stream in; a sentence end or a 2 s lull closes the line ----------
+// ElevenLabs closes its lines itself (on a pause) and, with speakers on, says who spoke each part
+
+const live = { text: '', timer: null, sent: 0, model: '', who: new Map() };
+
+async function liveStart() {
+  const { key, lang, bias, provider } = rec.opts;
+  live.who = new Map(); // a new session numbers its speakers afresh
+  live.model = await host.rtStart({ key, lang, bias, provider, diarize: prefs.get('diarize', '1') === '1' }, liveEvent);
+  return true;
+}
+
+function liveAudio(pcm) {
+  live.sent += pcm.length;
+  host.rtAudio(pcm);
+}
+
+function liveCommit() {
+  clearTimeout(live.timer);
+  const text = live.text.trim();
+  live.text = '';
+  if (text) prompt.final(text); else prompt.partial('');
+}
+
+function liveBill() {
+  if (live.sent) used(rec.opts.provider, 'captions', live.model, live.sent / SR);
+  live.sent = 0;
+}
+
+function liveEvent(ev) {
+  if (ev.type === 'delta') {
+    live.text += ev.text;
+    clearTimeout(live.timer);
+    // shown at once in the lighter "still speaking" style; the line becomes final at its full stop
+    if (/[.;!?…]\s*$/.test(live.text)) return liveCommit();
+    prompt.partial(live.text.trim());
+    live.timer = setTimeout(liveCommit, 2000);
+  } else if (ev.type === 'partial') {
+    prompt.partial(ev.text.trim());
+  } else if (ev.type === 'final') {
+    // with speakers: a line per speaker, numbered by first appearance as in the meeting's lines
+    const w = live.who, segs = ev.words ? scribeSegments({ words: ev.words }).segments : [];
+    for (const s of segs.length ? segs : [{ text: ev.text, speaker_id: null }]) {
+      if (s.speaker_id != null && !w.has(s.speaker_id)) w.set(s.speaker_id, 'Ομιλητής ' + (w.size + 1));
+      prompt.final(s.text.trim(), w.get(s.speaker_id) || '');
+    }
+  } else if (ev.type === 'error') {
+    status('prompt', ev.text, true);
+  } else if (ev.type === 'closed') {
+    liveCommit();
+    liveBill();
+    if (rec.mode !== 'prompt' || !rec.live) return;
+    // the server ends long sessions (or the Wi-Fi blinked): reconnect, else carry on phrase by phrase
+    liveStart().catch(() => { rec.live = false; status('prompt', 'Η ζωντανή μεταγραφή κόπηκε: συνεχίζω φράση-φράση.'); });
+  }
 }
 
 function startClock(mode) {
@@ -389,7 +467,7 @@ function enqueue(mode, pcm, sec, who) {
       // translating with Mistral: one call straight into the target language, no Greek step to wait for
       const direct = mode === 'prompt' && !o.offline && o.provider === 'mistral' && prompt.cloudTarget();
       const r = await retry(() => o.offline
-        ? host.whisper(wav(pcm), { translate: mode === 'prompt' && prompt.whisperEnglish(), lang: o.lang, model: o.wmodel }).then(text => ({ text }))
+        ? host.whisper(wav(pcm), { translate: mode === 'prompt' && prompt.whisperEnglish(), lang: o.lang, model: o.wmodel, terms: prefs.get('lessonTerms', '') }).then(text => ({ text }))
         : direct ? translateAudio(o.key, pcm, direct).then(text => ({ text, translated: true }))
         : transcribe(o.key, o.model, pcm, { bias: o.bias, provider: o.provider, lang: o.lang }));
       const text = (r.text || '').trim();
@@ -417,6 +495,13 @@ async function stopRec() {
   host.keepAwake(false);
   panel(mode).querySelector('.level i').style.width = '0';
   paintRec();
+  if (rec.live) {
+    rec.live = false;
+    await host.rtStop();
+    await new Promise(r => setTimeout(r, 1500)); // the last words arrive after the end
+    liveCommit();
+    liveBill();
+  }
   rec.tracks.forEach(t => t.cut(true));
   if (rec.pending) status(mode, 'Ολοκλήρωση μεταγραφής…');
   await rec.queue; // never drop queued chunks
@@ -539,6 +624,194 @@ $('#meetSave').onclick = async () => {
     if (await host.save('# Μεταγραφή σύσκεψης\n\n' + text + '\n', name)) toast('Αποθηκεύτηκε.');
   } catch (e) { toast('Δεν αποθηκεύτηκε: ' + e.message); }
 };
+// ---------- lesson outline: the AI keeps a short outline of what the teacher has said, guided by today's plan ----------
+
+const outline = (() => {
+  const box = $('#outlineBox'), stat = $('#outlineStatus');
+  const mapBox = $('#outlineMap');
+  // zoom and pan by changing the viewBox; a new map keeps the view the pupil chose, until ⤢
+  const mapSvg = $('#mapSvg');
+  let vb = null, fitBox = null, moved = false, drag = null;
+  const setVb = v => { vb = v; mapSvg.querySelector('svg')?.setAttribute('viewBox', v.join(' ')); };
+  const toSvg = (cx, cy) => { const m = mapSvg.querySelector('svg').getScreenCTM().inverse(); return [m.a * cx + m.c * cy + m.e, m.b * cx + m.d * cy + m.f]; };
+  function zoom(f, at) {
+    if (!vb) return;
+    const [x, y, w, h] = vb, [px, py] = at || [x + w / 2, y + h / 2];
+    moved = true;
+    setVb([px - (px - x) * f, py - (py - y) * f, w * f, h * f]);
+  }
+  $('#mapIn').onclick = () => zoom(0.8);
+  $('#mapOut').onclick = () => zoom(1.25);
+  $('#mapFit').onclick = () => { moved = false; if (fitBox) setVb(fitBox); };
+  mapSvg.addEventListener('wheel', e => { if (!vb) return; e.preventDefault(); zoom(e.deltaY < 0 ? 0.9 : 1.1, toSvg(e.clientX, e.clientY)); }, { passive: false });
+  mapSvg.addEventListener('pointerdown', e => { if (!vb || !mapSvg.querySelector('svg')) return; drag = { at: toSvg(e.clientX, e.clientY) }; try { mapSvg.setPointerCapture(e.pointerId); } catch { /* a synthetic event */ } });
+  mapSvg.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const [sx, sy] = toSvg(e.clientX, e.clientY);
+    moved = true;
+    setVb([vb[0] - (sx - drag.at[0]), vb[1] - (sy - drag.at[1]), vb[2], vb[3]]); // the point grabbed stays under the finger
+  });
+  const drop = () => { drag = null; };
+  mapSvg.addEventListener('pointerup', drop);
+  mapSvg.addEventListener('pointercancel', drop);
+  // Mistral's medium model: the small one, a few updates in, filled the outline from the plan with things never said
+  const smart = c => c.p === 'mistral' ? 'mistral-medium-latest' : '';
+  let concept = null;
+  try { concept = JSON.parse(prefs.get('outlineMap', 'null')); } catch { /* none */ }
+  // the same lesson as a concept map (SVG); the AI gives the tree, conceptLayout places it
+  function renderMap() {
+    if (!concept) { mapSvg.innerHTML = '<p class="empty-hint">Ο χάρτης εμφανίζεται μόλις υπάρξει σχεδιάγραμμα.</p>'; return; }
+    const { nodes, edges, view } = conceptLayout(concept), e = t => esc(t).replace(/<\/?b>/g, '');
+    const label = l => `<text x="${(l.from.x + l.to.x) / 2}" y="${(l.from.y + l.to.y) / 2}" class="link" font-size="14" text-anchor="middle" dominant-baseline="middle">${e(l.label)}</text>`;
+    fitBox = view;
+    if (!moved) vb = view;
+    mapSvg.innerHTML = `<svg viewBox="${vb.join(' ')}" role="img" aria-label="Εννοιολογικός χάρτης: ${e(concept.label)}">` +
+      edges.map(l => `<line x1="${l.from.x}" y1="${l.from.y}" x2="${l.to.x}" y2="${l.to.y}"/>`).join('') +
+      nodes.map(n => `<g class="node l${n.level}"><rect x="${n.x - n.w / 2}" y="${n.y - n.h / 2}" width="${n.w}" height="${n.h}" rx="${Math.min(14, n.h / 2)}"/>` +
+        n.lines.map((t, i) => `<text x="${n.x}" y="${n.y + (i - (n.lines.length - 1) / 2) * n.size * 1.25}" font-size="${n.size}" text-anchor="middle" dominant-baseline="middle">${e(t)}</text>`).join('') + '</g>').join('') +
+      edges.filter(l => l.label).map(label).join('') + '</svg>';
+  }
+  async function updateMap(c) {
+    try {
+      const t = parseConcept(await chat(c.key, c.p,
+        'Φτιάξε εννοιολογικό χάρτη από το σχεδιάγραμμα ενός μαθήματος, για μαθητή δημοτικού. Απάντησε μόνο με JSON: ' +
+        '{"label": "κεντρική έννοια", "children": [{"label": "έννοια", "link": "σύνδεση από τον γονέα, 1-3 λέξεις, π.χ. χρειάζεται", ' +
+        '"children": [{"label": "...", "link": "..."}]}]}. Έως 6 κλάδοι, έως 3 υποκλάδοι ο καθένας, ετικέτες έως 4 λέξεις, ' +
+        'μόνο με όσα έχει το σχεδιάγραμμα, χωρίς δικές σου έννοιες.', text, 0, 'outline', smart(c)));
+      if (t) { concept = t; prefs.set('outlineMap', JSON.stringify(t)); renderMap(); }
+    } catch { /* keep the last map */ }
+  }
+  let text = prefs.get('outline', ''), summary = prefs.get('outlineSum', ''), heard = [], busy = false, timer = null;
+  // escaped, with the model's **terms** in bold
+  const esc = t => t.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  function render(before = '') {
+    const old = new Set(before.split('\n'));
+    let html = summary ? `<p class="summary">${esc(summary)}</p>` : '', list = false;
+    for (const l of text.split('\n').map(x => x.trim()).filter(Boolean)) {
+      const cls = before && !old.has(l) ? ' class="new"' : '';
+      if (l.startsWith('#')) { if (list) html += '</ul>'; list = false; html += `<h3${cls}>${esc(l.replace(/^#+\s*/, ''))}</h3>`; }
+      else { if (!list) html += '<ul>'; list = true; html += `<li${cls}>${esc(l.replace(/^[-*•]\s*/, ''))}</li>`; }
+    }
+    box.innerHTML = (list ? html + '</ul>' : html) || '<p class="empty-hint">Το σχεδιάγραμμα εμφανίζεται εδώ καθώς προχωρά το μάθημα.</p>';
+  }
+  async function update() {
+    timer = null;
+    if (busy || !heard.length) return;
+    const c = navigator.onLine && await cloud();
+    if (!c) { stat.textContent = 'Το σχεδιάγραμμα θέλει internet και κλειδί Mistral ή OpenAI.'; return; }
+    busy = true;
+    const said = heard.join(' ');
+    heard = [];
+    const plan = prefs.get('lessonPlan', '').trim();
+    try {
+      const out = await chat(c.key, c.p,
+        'Κρατάς ζωντανά το σχεδιάγραμμα ενός μαθήματος για μαθητή που δεν ακούει. Ενημέρωσε το σχεδιάγραμμα με τα νέα λόγια ' +
+        'του δασκάλου: πρόσθεσε μόνο ό,τι ουσιαστικό ειπώθηκε, με τη σειρά του μαθήματος (π.χ. Χαιρετισμός, Θέμα, κύρια σημεία, ' +
+        'παραδείγματα, εργασίες). Το πλάνο, αν υπάρχει, δίνει μόνο ονόματα ενοτήτων και τη σωστή γραφή των όρων: ΠΟΤΕ μη ' +
+        'γράφεις κάτι που δεν υπάρχει στα λόγια του δασκάλου (ούτε χαιρετισμό, ούτε όρο, ούτε ενότητα που δεν ειπώθηκε ακόμα). ' +
+        'Ενότητες: τα μέρη του μαθήματος (π.χ. Θέμα, ένα κομμάτι του πλάνου, Εργασία), όχι ο τίτλος του μαθήματος. ' +
+        'Κάθε σημείο είναι μικρή φράση με νόημα (π.χ. "Φυτά + φως → οξυγόνο"), όχι σκέτος όρος. ' +
+        'Απλά ελληνικά, έως 7 λέξεις ανά γραμμή, έως 8 ενότητες, τους βασικούς όρους μέσα σε **. Μορφή: ενότητα σε γραμμή που ' +
+        'αρχίζει με "# ", σημείο σε γραμμή που αρχίζει με "- ". Απάντησε μόνο με όλο το ενημερωμένο σχεδιάγραμμα.',
+        (plan ? 'Πλάνο μαθήματος:\n' + plan.slice(0, 6000) + '\n\n' : '') +
+        'Σχεδιάγραμμα ως τώρα:\n' + (text || '(κενό)') + '\n\nΝέα λόγια του δασκάλου:\n' + said, 0, 'outline', smart(c));
+      if (out) { const before = text || ' '; text = out; prefs.set('outline', text); render(before); updateMap(c); }
+      stat.textContent = 'Ενημερώθηκε ' + new Date().toLocaleTimeString('el', { hour: '2-digit', minute: '2-digit' }) + '.';
+    } catch (e) {
+      heard.unshift(said); // try these words again with the next ones
+      stat.textContent = 'Δεν ενημερώθηκε: ' + e.message;
+    }
+    busy = false;
+    if (heard.length) soon();
+  }
+  // every ~15 s of new captions, sooner after a long stretch: few calls, and a topic is usually whole by then
+  const soon = () => { if (!timer) timer = setTimeout(update, heard.join(' ').length > 600 ? 1000 : 15000); };
+  function add(t) { heard.push(t); soon(); }
+
+  const promptLesson = () => [...$('#promptText').children].filter(p => !p.classList.contains('me')).map(p => p.textContent).join('\n');
+  async function summarize(lesson) {
+    const c = navigator.onLine && await cloud();
+    if (!c) return toast('Η σύνοψη θέλει internet και κλειδί Mistral ή OpenAI.');
+    if (!text && !lesson) return toast('Δεν υπάρχει ακόμα μάθημα για σύνοψη.');
+    $('#outlineSum').disabled = true;
+    try {
+      summary = await chat(c.key, c.p, 'Γράψε σύνοψη του μαθήματος για μαθητή που δεν ακούει: 3 έως 5 σύντομες, απλές προτάσεις, ' +
+        'μόνο με όσα ειπώθηκαν και ό,τι πρέπει να κάνει ο μαθητής, αν ειπώθηκε. Τους βασικούς όρους μέσα σε **. Χωρίς τίτλο, μόνο τη σύνοψη.',
+        'Σχεδιάγραμμα:\n' + text + '\n\nΥπότιτλοι του μαθήματος:\n' + lesson.slice(-30000), 0, 'outline', smart(c));
+      prefs.set('outlineSum', summary);
+      render();
+    } catch (e) { toast('Η σύνοψη δεν έγινε: ' + e.message); }
+    $('#outlineSum').disabled = false;
+  }
+  $('#outlineSum').onclick = () => summarize(promptLesson());
+
+  // a whole lesson at once (the Teleprompt's captions, a meeting, a saved transcript) → outline, map and summary
+  async function fromText(all) {
+    all = (all || '').trim();
+    if (!all) return toast('Δεν υπάρχει κείμενο εκεί.');
+    if (busy) return toast('Περίμενε λίγο: ενημερώνεται ήδη.');
+    clearTimeout(timer);
+    timer = null;
+    text = summary = ''; concept = null; moved = false;
+    heard = [all.slice(-60000)]; // ~30k tokens: a long lesson fits whole
+    render(); renderMap();
+    stat.textContent = 'Φτιάχνω σχεδιάγραμμα, χάρτη και σύνοψη…';
+    await update();
+    if (text) await summarize(all);
+  }
+  $('#outlineFromPrompt').onclick = () => fromText(promptLesson());
+  $('#outlineFromMeeting').onclick = () => fromText(meetingText());
+  $('#outlineFromFile').onclick = () => $('#outlineFile').click();
+  $('#outlineFile').onchange = async e => {
+    const f = e.target.files[0];
+    e.target.value = ''; // the same file can be picked again
+    if (f) fromText(await f.text());
+  };
+
+  // PDF (desktop): the summary and the list on the first page, the whole map (not the zoomed view) on its own page
+  if (host.pdf) $('#outlinePdf').hidden = false;
+  $('#outlinePdf').onclick = async () => {
+    if (!text && !summary) return toast('Δεν υπάρχει ακόμα σχεδιάγραμμα.');
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    const svg = mapSvg.querySelector('svg');
+    let map = '';
+    if (svg && fitBox) { const s = svg.cloneNode(true); s.setAttribute('viewBox', fitBox.join(' ')); map = s.outerHTML; }
+    const html = `<!doctype html><meta charset="utf-8"><title>Μάθημα</title><style>
+      body { font: 15px/1.45 "Noto Sans", sans-serif; color: #1b1d1f; margin: 0; }
+      h1 { font-size: 22px; margin: 0 0 12px; } h3 { font-size: 17px; margin: 14px 0 4px; } ul { margin: 0; padding-left: 20px; }
+      .summary { background: #eef0f1; border-radius: 12px; padding: 10px 14px; margin: 0 0 8px; }
+      @page map { size: A4 landscape; } .map { page: map; break-before: page; height: 170mm; } .map svg { width: 100%; height: 100%; }
+      .node rect { fill: #e1e4e6; } .node.l0 rect { fill: #1b1d1f; } .node.l0 text { fill: #fff; font-weight: 700; }
+      .node.l1 text { font-weight: 600; } text { fill: #1b1d1f; font-family: "Noto Sans", sans-serif; }
+      line { stroke: #5d6368; stroke-width: 2; } .link { fill: #5d6368; font-style: italic; paint-order: stroke; stroke: #fff; stroke-width: 5px; }
+    </style><h1>Μάθημα ${d.toLocaleDateString('el')}</h1>${box.innerHTML.replace(/ class="new"/g, '')}${map ? `<div class="map">${map}</div>` : ''}`;
+    try { if (await host.pdf(html, `Μάθημα_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.pdf`)) toast('Αποθηκεύτηκε.'); }
+    catch (e) { toast('Το PDF δεν έγινε: ' + e.message); }
+  };
+
+  $('#outlineSave').onclick = async () => {
+    if (!text && !summary) return;
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    const name = `Μάθημα_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.md`;
+    const md = '# Μάθημα ' + d.toLocaleDateString('el') + '\n\n' + (summary ? summary + '\n\n' : '') +
+      text.split('\n').map(l => l.trim()).filter(Boolean).map(l => l.startsWith('#') ? '\n#' + l : l).join('\n').trim() + '\n';
+    try { if (await host.save(md, name)) toast('Αποθηκεύτηκε.'); } catch (e) { toast('Δεν αποθηκεύτηκε: ' + e.message); }
+  };
+  $('#outlineClear').onclick = () => {
+    text = summary = ''; concept = null; heard = []; moved = false;
+    ['outline', 'outlineSum', 'outlineMap'].forEach(k => prefs.set(k, ''));
+    render(); renderMap();
+  };
+  // list or map: the pupil picks
+  const view = v => { prefs.set('outlineView', v); box.hidden = v === 'map'; mapBox.hidden = v !== 'map'; };
+  segmented($('#outlineView'), [['list', 'Λίστα'], ['map', 'Χάρτης']], prefs.get('outlineView', 'list'), view);
+  view(prefs.get('outlineView', 'list'));
+  renderMap();
+  $('#outlineRec').onclick = () => toggleRec('prompt');
+  render();
+  return { add };
+})();
+
 $('#meetClear').onclick = () => { if (!rec.mode && !rec.busy) setLines([]); };
 
 // ---------- read aloud ----------
@@ -674,21 +947,23 @@ const ttsVoice = eng => prefs.get('ttsVoice-' + eng, eng === 'openai' ? 'marin' 
 let mmsOk = false; // desktop: the Meta MMS Greek voice is downloaded (Settings → Τοπικά μοντέλα)
 async function paintTts() {
   const eng = ttsEngine(), sel = $('#ttsVoice');
-  segmented($('#ttsPick'), [['local', 'Τοπικά'], ['mistral', 'Mistral'], ['openai', 'OpenAI']], eng, v => { prefs.set('ttsEngine', v); paintTts(); });
+  segmented($('#ttsPick'), [['local', 'Τοπικά'], ['mistral', 'Mistral'], ['openai', 'OpenAI'], ['elevenlabs', 'ElevenLabs']], eng, v => { prefs.set('ttsEngine', v); paintTts(); });
   $('#ttsVoiceRow').hidden = eng === 'local' && !mmsOk;
   $('#ttsHint').textContent = eng === 'local' ? (host.speak ? 'Η φωνή της συσκευής: δωρεάν, χωρίς internet.'
     : 'Δωρεάν, χωρίς internet. Piper: πιο γρήγορη, πιο ρομποτική. Meta MMS: πιο φυσική (άδεια μόνο για μη εμπορική χρήση).')
     : eng === 'mistral' ? 'Voxtral TTS: δεν έχει ελληνική φωνή, αλλά οι αγγλικές (π.χ. James) διαβάζουν καλά ελληνικά. Θέλει internet και κλειδί, ≈ $16 ανά εκατομμύριο χαρακτήρες.'
+    : eng === 'elevenlabs' ? 'ElevenLabs Multilingual v2: όλες οι φωνές μιλούν φυσικά ελληνικά (και οι δικές σας, αν φτιάξατε). Θέλει internet και κλειδί, ≈ $80 ανά εκατομμύριο χαρακτήρες.'
     : 'GPT-4o mini TTS: μιλά ελληνικά, θέλει internet και κλειδί, ≈ $0.015 το λεπτό. Η OpenAI το αποσύρει στις 6/1/2027.';
   if (eng === 'local' && !mmsOk) return;
   let list = eng === 'openai' ? OPENAI_VOICES.map(v => [v, v]) : eng === 'local' ? [['piper', 'Piper (rapunzelina)'], ['mms', 'Meta MMS']] : [];
-  if (eng === 'mistral') {
-    try { list = JSON.parse(prefs.get('mistralVoices', '[]')); } catch { list = []; }
-    const key = await apiKey('mistral');
+  const fetchVoices = { mistral: mistralVoices, elevenlabs: elevenVoices }[eng];
+  if (fetchVoices) {
+    try { list = JSON.parse(prefs.get(eng + 'Voices', '[]')); } catch { list = []; }
+    const key = await apiKey(eng);
     if (!list.length && key) {
-      try { list = await mistralVoices(key); prefs.set('mistralVoices', JSON.stringify(list)); } catch (e) { $('#ttsHint').textContent = 'Οι φωνές δεν φορτώθηκαν: ' + e.message; }
+      try { list = await fetchVoices(key); prefs.set(eng + 'Voices', JSON.stringify(list)); } catch (e) { $('#ttsHint').textContent = 'Οι φωνές δεν φορτώθηκαν: ' + e.message; }
     }
-    if (!ttsVoice('mistral') && list.length) prefs.set('ttsVoice-mistral', (list.find(([, n]) => n.startsWith('James ')) || list[0])[0]);
+    if (!ttsVoice(eng) && list.length) prefs.set('ttsVoice-' + eng, (list.find(([, n]) => n.startsWith('James ')) || list[0])[0]);
   }
   sel.replaceChildren(...list.map(([id, name]) => new Option(name, id)));
   sel.value = ttsVoice(eng);
@@ -746,7 +1021,7 @@ if (host.models) {
 
 async function welcome() {
   if (MINI || prefs.get('welcomed', '') || !host.models) return;
-  if (await apiKey('mistral') || await apiKey('openai')) return prefs.set('welcomed', '1');
+  if (Object.values(await keys()).some(Boolean)) return prefs.set('welcomed', '1');
   const status = await host.models.status();
   if (status.every(s => s.ready || MODEL_PACKS.find(p => p.id === s.id).extra)) return prefs.set('welcomed', '1');
   const total = MODEL_PACKS.reduce((n, p) => n + (p.extra ? 0 : packSize(p)), 0);
@@ -770,7 +1045,8 @@ async function paintKey() {
   $('#keyWhere').dataset.local = provider() === 'local';
   keyField.placeholder = (await apiKey(keyProvider())) ? '•••••••• αποθηκευμένο — γράψε νέο για αλλαγή' : `Επικόλλησε εδώ το κλειδί της ${p.name}`;
   $('#keyTitle').textContent = `Κλειδί API της ${p.name}`;
-  $('#keyWhere').textContent = (provider() === 'local' ? 'Χρειάζεται μόνο για τη μετάφραση με internet. ' : '') +
+  $('#keyWhere').textContent = (provider() === 'local' && p.chat ? 'Χρειάζεται μόνο για τη μετάφραση με internet. ' : '') +
+    (p.chat ? '' : 'Η ElevenLabs δεν μεταφράζει ούτε φτιάχνει περιλήψεις· γι’ αυτά χρειάζεται και κλειδί Mistral ή OpenAI. ') +
     `Το παίρνεις από το ${p.console}. Κάθε υπηρεσία έχει δικό της κλειδί· αποθηκεύεται κρυπτογραφημένο μόνο σε αυτή τη συσκευή.`;
   keyStatus('');
 }
@@ -816,7 +1092,7 @@ function paintUsage() {
 }
 $('#usageLink').onclick = () => show('usage');
 
-const FEATURES = { captions: 'Υπότιτλοι', meeting: 'Σύσκεψη (ομιλητές)', translate: 'Μετάφραση', questions: 'Ερωτήσεις μαθητή',
+const FEATURES = { captions: 'Υπότιτλοι', meeting: 'Σύσκεψη (ομιλητές)', translate: 'Μετάφραση', questions: 'Ερωτήσεις μαθητή', lesson: 'Όροι μαθήματος', outline: 'Σχεδιάγραμμα',
   read: 'Ανάγνωση', chat: 'Άλλο', before: 'Πριν από το ιστορικό' };
 const budgetField = $('#budgetField'), budgetSave = $('#budgetSave');
 let historyTab = 'days', historyAll = false, budgetSaved = false;
@@ -881,7 +1157,9 @@ function paintEngine() {
   });
   $('#modelPick').hidden = !list.length;
   segmented($('#modelPick'), list, model(p), v => prefs.set('model-' + p, v));
-  $('#engineHint').textContent = p !== 'local'
+  $('#engineHint').textContent = p === 'elevenlabs'
+    ? 'ElevenLabs Scribe: πολύ ακριβές στα ελληνικά, σημειώνει ήχους όπως (γέλια) και ξεχωρίζει ομιλητές, και ζωντανά στους υπότιτλους. Θέλει internet και κλειδί, χρεώνεται ανά λεπτό.'
+    : p !== 'local'
     ? `${PROVIDERS[p].name}: πιο ακριβές, θέλει internet και κλειδί, χρεώνεται ανά λεπτό. Τα «mini» είναι φθηνότερα και εξίσου καλά στα ελληνικά.`
     : host.listen ? 'Στη συσκευή: δωρεάν, ο ήχος δεν φεύγει από το tablet.'
     : 'Whisper σε αυτόν τον υπολογιστή, με την κάρτα γραφικών: δωρεάν, χωρίς internet, ~1–2 δευτερόλεπτα ανά φράση. Medium: η καλή ισορροπία· Large: ακριβέστερο αλλά πολύ αργό εδώ. Χωρίς internet ή κλειδί, η εφαρμογή περνά μόνη της στο τοπικό.';
@@ -891,6 +1169,31 @@ function paintEngine() {
 const termsField = $('#termsField');
 termsField.value = prefs.get('terms', DEFAULT_TERMS);
 termsField.addEventListener('change', () => prefs.set('terms', termsField.value));
+
+// today's lesson plan → its terms, put first among the words to spell right (the cloud is needed only here, at home)
+const lessonPlan = $('#lessonPlan'), lessonTerms = $('#lessonTerms'), lessonBtn = $('#lessonBtn');
+lessonPlan.value = prefs.get('lessonPlan', '');
+lessonTerms.value = prefs.get('lessonTerms', '');
+lessonPlan.addEventListener('change', () => prefs.set('lessonPlan', lessonPlan.value));
+lessonTerms.addEventListener('change', () => prefs.set('lessonTerms', lessonTerms.value));
+lessonBtn.onclick = async () => {
+  const plan = lessonPlan.value.trim();
+  if (!plan) return lessonPlan.focus();
+  const c = await cloud();
+  if (!c) return toast('Χρειάζεται κλειδί Mistral ή OpenAI για να βρεθούν οι όροι.');
+  lessonBtn.disabled = true;
+  lessonBtn.textContent = 'Ψάχνω…';
+  try {
+    const out = await chat(c.key, c.p,
+      'Από το πλάνο μαθήματος, γράψε τους όρους που ο δάσκαλος θα πει και ένα πρόγραμμα αναγνώρισης ομιλίας μπορεί να γράψει λάθος: ' +
+      'ειδικούς όρους, ονόματα, τόπους, ξένες λέξεις, ακρωνύμια. Όχι κοινές λέξεις. Έως 40, χωρισμένοι με κόμμα, όπως γράφονται σωστά, ' +
+      'χωρίς άλλο κείμενο.', plan.slice(0, 12000), 0, 'lesson');
+    lessonTerms.value = terms(out.replace(/\n/g, ',')).slice(0, 40).join(', ');
+    prefs.set('lessonTerms', lessonTerms.value);
+  } catch (e) { toast('Οι όροι δεν βρέθηκαν: ' + e.message); }
+  lessonBtn.disabled = false;
+  lessonBtn.textContent = 'Βρες τους όρους';
+};
 const diarizeBox = $('#diarizeBox');
 diarizeBox.checked = prefs.get('diarize', '1') === '1';
 diarizeBox.onchange = () => prefs.set('diarize', diarizeBox.checked ? '1' : '0');
@@ -1179,13 +1482,14 @@ const prompt = (() => {
   lastFinal = 0;
 
   function partial(text) {
-    if (!text) { if (partialEl) partialEl.remove(); partialEl = null; return; }
+    if (!text) { if (partialEl) partialEl.remove(); partialEl = null; overlay(); return; }
     if (!partialEl) {
       partialEl = document.createElement('span');
       partialEl.className = 'partial';
       (para || (newPara(), para)).append(partialEl);
     }
     partialEl.textContent = ' ' + text;
+    overlay();
   }
 
   let lastWho = '';
@@ -1202,9 +1506,11 @@ const prompt = (() => {
     if (translating && !translated && !whisperEnglish()) addTranslation(text);
     else para.append((para.textContent ? ' ' : '') + text);
     lastFinal = Date.now();
+    overlay();
     while (box.childElementCount > 400) box.firstElementChild.remove();
     save();
     suggestSoon();
+    outline.add(text);
   }
 
   // tap-to-ask: every ~20 s of new lesson, the cloud proposes 3 short questions (≈ $0.0001 each time)
@@ -1381,6 +1687,24 @@ const prompt = (() => {
   const page = $('#prompt');
   page.classList.toggle('swapped', prefs.get('promptSwap', '0') === '1');
   $('#swapBtn').onclick = () => prefs.set('promptSwap', page.classList.toggle('swapped') ? '1' : '0');
+
+  // the caption overlay (desktop): the newest words across the bottom of the screen, over every app
+  let overlayOn = false;
+  function overlay() {
+    if (!overlayOn) return;
+    const last = [...box.children].filter(p => !p.classList.contains('me')).slice(-2);
+    const text = last.map(p => [...p.childNodes].filter(n => n !== partialEl).map(n => n.textContent).join('')).join(' ').trim();
+    host.capText({ text: text.slice(-260), partial: partialEl ? partialEl.textContent.trim() : '' });
+  }
+  if (host.capOpen && !MINI) {
+    $('#overlayBtn').hidden = false;
+    $('#overlayBtn').onclick = async () => {
+      overlayOn = true;
+      await host.capOpen(() => { overlayOn = false; });
+      setTimeout(overlay, 800); // once its page has loaded
+      if (!rec.mode) toggleRec('prompt'); // one click: the captions start too
+    };
+  }
 
   // the target language when the cloud does the translating, else ''
   const cloudTarget = () => translating && !whisperEnglish() ? trLang.value : '';

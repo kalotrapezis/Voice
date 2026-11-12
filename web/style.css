@@ -65,6 +65,27 @@ h1 { font-size: 28px; font-weight: 600; margin: 4px 4px 4px; }
 .line b { font-weight: 600; margin-right: 4px; }
 .line.pending { color: var(--muted); font-style: italic; }
 .empty-hint { color: var(--muted); margin: 8px 4px; }
+.outline { font-size: 22px; line-height: 1.4; }
+.outline h3 { font-size: 1.1em; margin: .6em 0 .2em; }
+.outline h3:first-child { margin-top: 0; }
+.outline ul { margin: 0 0 .3em; padding-left: 1.2em; }
+.outline .new { animation: fresh 3s ease-out; }
+.outline .summary { background: var(--island-2); border-radius: var(--radius); padding: .5em .8em; margin: 0 0 .8em; }
+.concept { position: relative; display: flex; padding: 8px; overflow: hidden; }
+.concept .map-svg { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+.concept svg { width: 100%; height: 100%; touch-action: none; cursor: grab; user-select: none; }
+.concept svg:active { cursor: grabbing; }
+.map-tools { position: absolute; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+.map-tools .round { font-size: 22px; font-weight: 600; background: var(--island-2); }
+.concept .node rect { fill: var(--island-2); }
+.concept .node.l0 rect { fill: var(--accent); }
+.concept .node.l0 text { fill: var(--on-accent); font-weight: 700; }
+.concept .node.l1 text { font-weight: 600; }
+.concept text { fill: var(--text); font-family: inherit; }
+.concept line { stroke: var(--muted); stroke-width: 2; }
+.concept .link { fill: var(--muted); font-style: italic; paint-order: stroke; stroke: var(--island); stroke-width: 5px; }
+#outlineView { align-self: flex-start; }
+@keyframes fresh { from { background: color-mix(in srgb, var(--accent) 30%, transparent); } }
 
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .pill-button { display: inline-flex; align-items: center; gap: 8px; padding: 11px 20px; border-radius: 999px; font-weight: 600; background: var(--island); }
@@ -124,8 +145,8 @@ h2.group { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-
 .slider input { width: 110px; accent-color: var(--accent); }
 .slider.wide { display: grid; grid-template-columns: 160px 1fr 70px; height: auto; padding: 10px 16px; border-radius: 16px; }
 .slider.wide input, .slider.wide select { width: 100%; }
-.prompt-view { grid-area: view; position: relative; min-height: 120px; overflow-y: auto; border-radius: var(--radius); padding: .4em .6em .6em; line-height: 1.3; font-weight: 500; touch-action: pan-y; overflow-wrap: anywhere; outline: none; }
-.prompt-view.dark { background: #000; color: #fff; }
+.prompt-view { grid-area: view; position: relative; min-height: 120px; overflow-y: auto; border-radius: var(--radius); padding: .4em .6em .6em; line-height: 1.3; font-weight: 500; touch-action: pan-y; overflow-wrap: anywhere; outline: none; scrollbar-width: thin; }
+.prompt-view.dark { background: #000; color: #fff; color-scheme: dark; }
 .prompt-view.light { background: #fff; color: #000; border: 1px solid var(--island-2); }
 .prompt-view p { margin: 0 0 .5em; }
 .prompt-view .partial { opacity: .7; }
@@ -241,10 +262,10 @@ body.mini .nomic { display: none; }
 .scan video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pcmic { display: grid; justify-items: center; gap: 22px; padding: 24px 8px; text-align: center; }
 .pc-name { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 20px; font-weight: 600; }
-.light { width: 14px; height: 14px; border-radius: 50%; background: var(--muted); flex: none; }
-.light.ok { background: var(--ok); box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 25%, transparent); }
-.light.wait { background: var(--wait); animation: blink 1s infinite; }
-.light.bad { background: var(--rec); }
+i.light { width: 14px; height: 14px; border-radius: 50%; background: var(--muted); flex: none; }
+i.light.ok { background: var(--ok); box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 25%, transparent); }
+i.light.wait { background: var(--wait); animation: blink 1s infinite; }
+i.light.bad { background: var(--rec); }
 @keyframes blink { 50% { opacity: .3; } }
 .pcmic-btn { width: 160px; height: 160px; border-radius: 50%; display: grid; place-items: center; background: var(--island-2); color: var(--text); transition: transform .1s; }
 .pcmic-btn:active { transform: scale(.95); }

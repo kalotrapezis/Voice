@@ -124,7 +124,7 @@ const infer = (s, wavBytes, fields) => {
 let sttWaiting = 0; // phrases on their way to the server: warm-up never queues ahead of one
 
 // translate: whisper's own task, speech in any language → English text only
-ipcMain.handle('stt:run', async (_e, wavBytes, { translate = false, lang = 'el', model = 'medium' } = {}) => {
+ipcMain.handle('stt:run', async (_e, wavBytes, { translate = false, lang = 'el', model = 'medium', terms = '' } = {}) => {
   const m = pickModel(model, translate);
   if (WSERVER) {
     sttWaiting++;
@@ -133,7 +133,9 @@ ipcMain.handle('stt:run', async (_e, wavBytes, { translate = false, lang = 'el',
       await s.ready;
       // no_timestamps as -nt below: with timestamps the server cut its text every 60 characters, mid-word ("ουραν ό"),
       // and cost accuracy (FLEURS Greek, medium: 33% → 26% wrong words)
-      const r = await infer(s, wavBytes, { language: lang, translate, no_timestamps: true, audio_ctx: audioCtx(wavBytes.byteLength) });
+      // the words to spell right as whisper's prompt (Settings: terms, today's lesson); cut to stay well inside its 224 tokens
+      const prompt = terms && !translate ? { prompt: terms.slice(0, 300) } : {};
+      const r = await infer(s, wavBytes, { language: lang, translate, no_timestamps: true, audio_ctx: audioCtx(wavBytes.byteLength), ...prompt });
       if (r.ok) return cleanText((await r.json()).text || '');
     } catch { /* fall back to one whisper-cli run below */ } finally { sttWaiting--; }
   }
@@ -265,6 +267,73 @@ ipcMain.handle('sys:start', e => {
 });
 ipcMain.handle('sys:stop', () => { if (parec) parec.kill(); parec = null; });
 
+// ---- live captions: Mistral's realtime transcription; words arrive while the teacher speaks, not after each phrase.
+// Here, not in the page, because a browser WebSocket cannot send the Authorization header.
+const RT_MODEL = 'voxtral-mini-transcribe-realtime-3';
+let rt = null;
+ipcMain.handle('rt:start', (e, { key, lang = 'el', bias = [], provider = 'mistral', diarize = false } = {}) => new Promise((resolve, reject) => {
+  if (rt) { const old = rt; rt = null; old.close(); }
+  if (!key) return reject(new Error('χωρίς κλειδί'));
+  if (provider === 'elevenlabs') return rtEleven(e, { key, lang, bias, diarize }, resolve, reject);
+  const ws = rt = new WebSocket(`wss://api.mistral.ai/v1/audio/transcriptions/realtime?model=${RT_MODEL}`, { headers: { Authorization: 'Bearer ' + key } });
+  const send = ev => { if (!e.sender.isDestroyed()) e.sender.send('rt:event', ev); };
+  let ready = false;
+  ws.onmessage = m => {
+    const j = JSON.parse(m.data);
+    if (j.type === 'session.created') {
+      const session = { audio_format: { encoding: 'pcm_s16le', sample_rate: 16000 }, target_streaming_delay_ms: 480 };
+      if (lang !== 'auto') session.language = lang;
+      if (bias.length) session.context_bias = bias;
+      ws.send(JSON.stringify({ type: 'session.update', session }));
+    } else if (j.type === 'session.updated') { ready = true; resolve(RT_MODEL); }
+    else if (j.type === 'transcription.text.delta') send({ type: 'delta', text: j.text });
+    else if (j.type === 'transcription.done') send({ type: 'done', usage: j.usage });
+    else if (j.type === 'error') { const msg = j.error?.message || 'σφάλμα'; if (ready) send({ type: 'error', text: msg }); else reject(new Error(msg)); }
+  };
+  ws.onerror = () => { if (!ready) reject(new Error('η ζωντανή μεταγραφή δεν συνδέθηκε')); };
+  // 'closed' only when the server or the network ended it: a stop or a restart from the page sets rt aside first
+  ws.onclose = () => { if (rt !== ws) return reject(new Error('stopped')); rt = null; if (ready) send({ type: 'closed' }); else reject(new Error('η ζωντανή μεταγραφή δεν συνδέθηκε')); };
+}));
+
+// ElevenLabs Scribe live: it closes a line itself on a pause (commit_strategy vad); with diarize a second message
+// gives the line's words with who said them, so the line waits up to 1.5 s for it and goes out unlabelled without it
+const EL_RT_MODEL = 'scribe_v3_live';
+const elChunk = (audio, commit = false) => JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: audio, commit, sample_rate: 16000 });
+function rtEleven(e, { key, lang, bias, diarize }, resolve, reject) {
+  const q = new URLSearchParams({ model_id: EL_RT_MODEL, audio_format: 'pcm_16000', commit_strategy: 'vad' });
+  if (lang !== 'auto') q.set('language_code', lang);
+  if (diarize) q.set('diarize', 'true');
+  for (const t of bias.filter(t => t.length <= 20).slice(0, 50)) q.append('keyterms', t); // live takes 50 terms of ≤ 20 characters
+  const ws = rt = new WebSocket('wss://api.elevenlabs.io/v1/speech-to-text/realtime?' + q, { headers: { 'xi-api-key': key } });
+  ws.chunk = elChunk;
+  const send = ev => { if (!e.sender.isDestroyed()) e.sender.send('rt:event', ev); };
+  let ready = false, held = null;
+  const flush = () => { if (held) { clearTimeout(held.timer); send({ type: 'final', text: held.text }); held = null; } };
+  ws.onmessage = m => {
+    const j = JSON.parse(m.data), t = j.message_type;
+    if (t === 'session_started') { ready = true; resolve(EL_RT_MODEL); }
+    else if (t === 'partial_transcript') send({ type: 'partial', text: j.text || '' });
+    else if (t === 'committed_transcript') { flush(); if (diarize) held = { text: j.text || '', timer: setTimeout(flush, 1500) }; else send({ type: 'final', text: j.text || '' }); }
+    else if (t === 'diarized_transcript' && held) { clearTimeout(held.timer); send({ type: 'final', text: held.text, words: j.words || [] }); held = null; }
+    else if (/error|exceeded|limited/.test(t)) { const msg = `ElevenLabs: ${j.error || j.message || t}`; if (ready) send({ type: 'error', text: msg }); else reject(new Error(msg)); }
+  };
+  ws.onerror = () => { if (!ready) reject(new Error('η ζωντανή μεταγραφή δεν συνδέθηκε')); };
+  ws.onclose = () => { flush(); if (rt !== ws) return reject(new Error('stopped')); rt = null; if (ready) send({ type: 'closed' }); else reject(new Error('η ζωντανή μεταγραφή δεν συνδέθηκε')); };
+}
+
+ipcMain.on('rt:audio', (_e, buf) => {
+  if (rt?.readyState !== WebSocket.OPEN) return;
+  const audio = Buffer.from(buf).toString('base64');
+  rt.send(rt.chunk ? rt.chunk(audio) : JSON.stringify({ type: 'input_audio.append', audio }));
+});
+ipcMain.handle('rt:stop', () => {
+  const ws = rt;
+  rt = null;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(ws.chunk ? ws.chunk('', true) : JSON.stringify({ type: 'input_audio.end' }));
+  setTimeout(() => ws.close(), 3000); // the last words arrive after the end
+});
+
 // ---- Wi-Fi mics: phones/tablets running VOICE POST 16 kHz mono s16le here; the page mixes them (AutoMixer) ----
 const WIFI_PORT = 8790;
 let wifi = null, wifiTo = null, wifiCode = '';
@@ -335,23 +404,111 @@ ipcMain.handle('mini:open', async (_e, onTop = true) => {
 // KDE on Wayland ignores alwaysOnTop (Wayland has no such request), so ask KWin itself through its scripting API.
 // The script waits for the window to appear (running it after load raced the mapping), then stops listening.
 // Each load gets a new name: reloading under the same name returns the old, still-unloading script, which never runs.
+// a spot { left | right (+ width), top | bottom, height } inside area A → a rectangle; also written into KWin scripts
+const rect = (p, A) => {
+  const width = p.width ?? A.width - (p.left || 0) - (p.right || 0);
+  return { x: A.x + (p.left ?? A.width - p.right - width), y: A.y + (p.top ?? A.height - p.bottom - p.height), width, height: p.height };
+};
+const kwinOn = () => process.platform === 'linux' && !!process.env.WAYLAND_DISPLAY && /KDE/i.test(process.env.XDG_CURRENT_DESKTOP || '');
+const kwinCall = (obj, method, ...args) => output('gdbus', ['call', '--session', '--dest', 'org.kde.KWin', '--object-path', obj, '--method', 'org.kde.kwin.' + method, ...args]);
+/** Load and run one KWin script under a fresh name (a reused name returns the old, still-unloading script). */
+async function kwinRun(code, prefix) {
+  const js = path.join(app.getPath('userData'), prefix + '.js');
+  fs.writeFileSync(js, code);
+  const name = prefix + '-' + Date.now();
+  const id = /\d+/.exec(await kwinCall('/Scripting', 'Scripting.loadScript', js, name))?.[0];
+  if (id) await kwinCall('/Scripting/Script' + id, 'Script.run');
+  return name;
+}
 let kwinScript = null;
-async function kwinKeepAbove(title, on) {
-  if (process.platform !== 'linux' || !process.env.WAYLAND_DISPLAY || !/KDE/i.test(process.env.XDG_CURRENT_DESKTOP || '')) return;
-  const call = (obj, method, ...args) => output('gdbus', ['call', '--session', '--dest', 'org.kde.KWin', '--object-path', obj, '--method', 'org.kde.kwin.' + method, ...args]);
-  if (kwinScript) await call('/Scripting', 'Scripting.unloadScript', kwinScript);
+async function kwinKeepAbove(title, on, place = {}) {
+  if (!kwinOn()) return;
+  if (kwinScript) await kwinCall('/Scripting', 'Scripting.unloadScript', kwinScript);
   kwinScript = null;
   if (!on) return;
-  const js = path.join(app.getPath('userData'), 'keep-above.js');
-  fs.writeFileSync(js, `const T = ${JSON.stringify(title)};
-function f(w) { if (w.caption !== T) return false; w.keepAbove = true; try { workspace.windowAdded.disconnect(added); } catch (e) {} return true; }
+  // title: one window's title, or several (the caption overlay has two)
+  // place: { title: spot (see rect) } in the usable area (above the panel), since a Wayland window cannot position itself
+  kwinScript = await kwinRun(`const T = ${JSON.stringify([].concat(title))}, P = ${JSON.stringify(place)}; let left = T.length;
+function f(w) { if (!T.includes(w.caption) || w.keepAbove) return false; w.keepAbove = true; place(w); if (--left === 0) try { workspace.windowAdded.disconnect(added); } catch (e) {} return true; }
 function added(w) { if (!f(w)) w.captionChanged.connect(() => f(w)); }
-if (!workspace.windowList().some(f)) workspace.windowAdded.connect(added);`);
-  kwinScript = 'voice-keep-above-' + Date.now();
-  const id = /\d+/.exec(await call('/Scripting', 'Scripting.loadScript', js, kwinScript))?.[0];
-  if (id) await call('/Scripting/Script' + id, 'Script.run');
+const rect = ${rect};
+function place(w) { const p = P[w.caption]; if (p) w.frameGeometry = rect(p, workspace.clientArea(KWin.MaximizeArea, w)); }
+workspace.windowList().forEach(f);
+if (left > 0) workspace.windowAdded.connect(added);`, 'voice-keep-above');
 }
 ipcMain.handle('mini:close', () => { if (mini) mini.close(); });
+
+// ---- caption overlay: the teleprompt's words along the bottom of the screen, over any app.
+// Where the mouse can pass through a window (Windows, macOS, X11) it does; on Wayland it cannot (Electron's
+// setIgnoreMouseEvents and setShape both still take the click, tested on KDE, Nov 2026), so there the words jump to the
+// other edge of the screen as soon as the pointer comes onto them. The ✕ is a window of its own beside the words.
+let cap = null, capX = null, capTop = false, capMoved = 0;
+const CAP = 'VOICE captions', CAPX = 'VOICE captions close', clickThrough = !process.env.WAYLAND_DISPLAY;
+const capPage = (name, body) => 'data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><title>${name}</title>${body}`);
+const capHeight = () => Math.round(Math.min(260, screen.getPrimaryDisplay().workArea.height * 0.3));
+function capSpots(h = capHeight()) {
+  const edge = capTop ? { top: 0 } : { bottom: 0 }, xEdge = capTop ? { top: 8 } : { bottom: h - 56 };
+  return { [CAP]: { left: 0, right: 64, height: h, ...edge }, [CAPX]: { right: 8, width: 48, height: 48, ...xEdge } };
+}
+let kwinMove = null;
+async function capPlace() {
+  const spots = capSpots();
+  if (!kwinOn()) {
+    const A = screen.getPrimaryDisplay().workArea;
+    if (cap) cap.setBounds(rect(spots[CAP], A));
+    if (capX) capX.setBounds(rect(spots[CAPX], A));
+    return;
+  }
+  const old = kwinMove;
+  kwinMove = await kwinRun(`const P = ${JSON.stringify(spots)}, rect = ${rect};
+workspace.windowList().forEach(w => { const p = P[w.caption]; if (p) w.frameGeometry = rect(p, workspace.clientArea(KWin.MaximizeArea, w)); });`, 'voice-move');
+  if (old) kwinCall('/Scripting', 'Scripting.unloadScript', old).catch(() => {});
+}
+ipcMain.handle('cap:open', async () => {
+  if (cap) return;
+  capTop = false;
+  const A = screen.getPrimaryDisplay().workArea, spots = capSpots();
+  await kwinKeepAbove([CAP, CAPX], true, spots).catch(() => {});
+  const common = { frame: false, resizable: false, movable: false, alwaysOnTop: true, skipTaskbar: true, focusable: false, hasShadow: false,
+    transparent: true, backgroundColor: '#00000000', webPreferences: { preload: path.join(__dirname, 'preload.js') } };
+  cap = new BrowserWindow({ ...common, ...rect(spots[CAP], A), title: CAP });
+  if (clickThrough) cap.setIgnoreMouseEvents(true);
+  cap.loadFile(path.join(WEB, 'captions.html'));
+  capX = new BrowserWindow({ ...common, ...rect(spots[CAPX], A), title: CAPX });
+  capX.loadURL(capPage(CAPX, `<style>html,body{margin:0;background:transparent;overflow:hidden}
+button{width:44px;height:44px;margin:2px;border:0;border-radius:50%;background:rgba(0,0,0,.65);color:#fff;font:700 22px sans-serif;cursor:pointer}
+button:hover{background:#c62828}</style><button aria-label="Κλείσιμο υποτίτλων" onclick="voiceElectron.capClose()">✕</button>`));
+  for (const w of [cap, capX]) {
+    w.setAlwaysOnTop(true, 'screen-saver');
+    w.on('page-title-updated', e => e.preventDefault()); // KWin finds them by title
+    w.on('closed', capClose);
+  }
+  // the main window keeps recording behind the overlay: don't let Chromium slow its timers
+  mainWin?.webContents.setBackgroundThrottling(false);
+  mainWin?.minimize();
+});
+// the pointer came onto the words: move them to the other edge (not again for a moment, so they cannot bounce)
+ipcMain.on('cap:dodge', () => {
+  if (!cap || clickThrough || Date.now() - capMoved < 600) return;
+  capMoved = Date.now();
+  capTop = !capTop;
+  capPlace().catch(() => {});
+});
+function capClose() {
+  const a = cap, b = capX;
+  cap = capX = null;
+  for (const w of [a, b]) if (w && !w.isDestroyed()) w.close();
+  if (!a && !b) return;
+  kwinKeepAbove(null, false).catch(() => {});
+  if (kwinMove) { kwinCall('/Scripting', 'Scripting.unloadScript', kwinMove).catch(() => {}); kwinMove = null; }
+  if (mainWin && !mainWin.isDestroyed()) {
+    mainWin.webContents.setBackgroundThrottling(true);
+    mainWin.restore(); mainWin.show();
+    mainWin.webContents.send('cap:closed');
+  }
+}
+ipcMain.on('cap:close', capClose);
+ipcMain.on('cap:text', (_e, t) => { if (cap && !cap.isDestroyed()) cap.webContents.send('cap:text', t); });
 
 const has = cmd => { try { execFileSync('which', [cmd], { stdio: 'ignore' }); return true; } catch { return false; } };
 const run = (cmd, args) => new Promise(ok => { const p = spawn(cmd, args, { stdio: 'ignore' }); p.on('error', () => ok(false)); p.on('close', c => ok(c === 0)); });
@@ -385,6 +542,20 @@ ipcMain.handle('save', async (e, text, name) => {
   });
   if (r.canceled || !r.filePath) return false;
   fs.writeFileSync(r.filePath, text, 'utf8');
+  return true;
+});
+
+// a page (the lesson outline: summary, list, map) → an A4 PDF, printed by a hidden window
+ipcMain.handle('pdf', async (e, html, name) => {
+  const r = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender), {
+    defaultPath: path.join(app.getPath('documents'), name), filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (r.canceled || !r.filePath) return false;
+  const w = new BrowserWindow({ show: false, webPreferences: { javascript: false } });
+  try {
+    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    fs.writeFileSync(r.filePath, await w.webContents.printToPDF({ pageSize: 'A4', printBackground: true, preferCSSPageSize: true }));
+  } finally { w.destroy(); }
   return true;
 });
 

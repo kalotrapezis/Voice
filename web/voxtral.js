@@ -5,7 +5,7 @@ const SR = 16000;                 // Hz, mono Int16 everywhere
 const FRAME = 480;                // 30 ms
 const CHUNK = 25 * SR;            // meeting/dictation chunk, in samples
 const CUT_WINDOW = 5 * SR;        // cut on the quietest frame of the chunk's last 5 s
-// both speak the same REST shape; each needs its own key from its own console
+// Mistral and OpenAI speak the same REST shape, ElevenLabs its own; each needs its own key from its own console
 const PROVIDERS = {
   // on this device: whisper.cpp on the desktop (models listed by main.js), Android's own recognizer on a tablet
   local: { name: 'Τοπικά', models: [['turbo', 'Whisper Large v3 Turbo'], ['medium', 'Whisper Medium'], ['small', 'Whisper Small'], ['large', 'Whisper Large v3']] },
@@ -13,7 +13,14 @@ const PROVIDERS = {
     models: [['voxtral-mini-transcribe-3', 'Voxtral Mini'], ['voxtral-small-transcribe-3', 'Voxtral Small']] },
   openai: { name: 'OpenAI', api: 'https://api.openai.com/v1', chat: 'gpt-4o-mini', console: 'platform.openai.com → API keys',
     models: [['gpt-4o-mini-transcribe', 'GPT-4o mini'], ['gpt-4o-transcribe', 'GPT-4o']] },
+  // no chat model: translation, summaries and questions go to Mistral/OpenAI when one has a key
+  elevenlabs: { name: 'ElevenLabs', api: 'https://api.elevenlabs.io/v1', console: 'elevenlabs.io → Developers → API Keys',
+    models: [['scribe_v2', 'Scribe v2'], ['scribe_v3', 'Scribe v3']] },
 };
+// ElevenLabs takes its key in its own header; the others take a Bearer token
+const auth = (provider, key) => provider === 'elevenlabs' ? { 'xi-api-key': key } : { Authorization: 'Bearer ' + key };
+// a wrong key: 401, or ElevenLabs' 400 "authentication_error"
+const badKey = async r => r.status === 401 || (r.status === 400 && (await r.clone().text()).includes('authentication_error'));
 const DEFAULT_TERMS = 'jamovi, SPSS, t-test, ANOVA, Likert, Levene, Shapiro-Wilk, p-value, Cronbach\'s alpha';
 
 function rms(pcm, from, to) {
@@ -93,11 +100,13 @@ const MODEL_PACKS = [
 
 // list prices in $, as published when written (shortcut: hand-kept, update when the providers change them)
 const PRICES = {
-  'voxtral-mini-transcribe-3': { min: 0.0035 }, 'voxtral-small-transcribe-3': { min: 0.004 },
-  'voxtral-small-latest': { min: 0.004, in: 0.1, out: 0.3 }, 'mistral-small-latest': { in: 0.1, out: 0.3 },
+  'voxtral-mini-transcribe-3': { min: 0.0035 }, 'voxtral-mini-transcribe-realtime-3': { min: 0.008 },'voxtral-small-transcribe-3': { min: 0.004 },
+  'voxtral-small-latest': { min: 0.004, in: 0.1, out: 0.3 }, 'mistral-small-latest': { in: 0.1, out: 0.3 }, 'mistral-medium-latest': { in: 0.4, out: 2 },
   // reading aloud, per character (Mistral's from aggregators, OpenAI's ≈ $0.015/min of speech)
   'voxtral-mini-tts-3': { char: 16e-6 }, 'gpt-4o-mini-tts': { char: 15e-6 },
   'gpt-4o-mini-transcribe': { min: 0.003 }, 'gpt-4o-transcribe': { min: 0.006 }, 'gpt-4o-mini': { in: 0.15, out: 0.6 },
+  // ElevenLabs pay-as-you-go (Nov 2026): Scribe $0.20/h batch, $0.22/h live, + keyterms $0.05/h and $0.08/h (we always send them)
+  'scribe_v2': { min: 0.25 / 60 }, 'scribe_v3': { min: 0.25 / 60 }, 'scribe_v3_live': { min: 0.30 / 60 }, 'eleven_multilingual_v2': { char: 80e-6 },
 };
 const cost = (model, sec, tin = 0, tout = 0, chars = 0) => {
   const p = PRICES[model] || {};
@@ -155,25 +164,52 @@ function usageSummary(log, now = Date.now()) {
   };
 }
 
+/** Scribe's keyterms: at most 50 characters and 5 words each, none of < > { } [ ] \ (shortcut: the first 100, as Mistral's). */
+const keyterms = bias => bias.filter(t => t.length <= 50 && t.split(/\s+/).length <= 5 && !/[<>{}[\]\\]/.test(t));
+
 async function transcribe(key, model, pcm, { diarize = false, bias = [], provider = 'mistral', lang = 'el' } = {}) {
-  const f = new FormData();
-  f.append('model', model);
-  // OpenAI takes the spelling hints as a free-text prompt; it has no diarize flag on these models
-  if (provider === 'openai') { if (bias.length) f.append('prompt', bias.join(', ')); diarize = false; }
-  else for (const t of bias) f.append('context_bias', t);
-  if (diarize) { f.append('diarize', 'true'); f.append('timestamp_granularities', 'segment'); }
-  else if (lang !== 'auto') f.append('language', lang);
-  f.append('file', new Blob([wav(pcm)], { type: 'audio/wav' }), 'audio.wav');
+  const f = new FormData(), el = provider === 'elevenlabs';
+  if (el) {
+    // Scribe keeps the language with diarization, and takes the raw 16 kHz PCM as it is
+    f.append('model_id', model);
+    if (lang !== 'auto') f.append('language_code', lang);
+    for (const t of keyterms(bias)) f.append('keyterms', t);
+    if (diarize) f.append('diarize', 'true');
+    f.append('file_format', 'pcm_s16le_16');
+    f.append('file', new Blob([pcm]), 'audio.pcm');
+  } else {
+    f.append('model', model);
+    // OpenAI takes the spelling hints as a free-text prompt; it has no diarize flag on these models
+    if (provider === 'openai') { if (bias.length) f.append('prompt', bias.join(', ')); diarize = false; }
+    else for (const t of bias) f.append('context_bias', t);
+    if (diarize) { f.append('diarize', 'true'); f.append('timestamp_granularities', 'segment'); }
+    else if (lang !== 'auto') f.append('language', lang);
+    f.append('file', new Blob([wav(pcm)], { type: 'audio/wav' }), 'audio.wav');
+  }
   let r;
   try {
-    r = await fetch(PROVIDERS[provider].api + '/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: f });
+    r = await fetch(PROVIDERS[provider].api + (el ? '/speech-to-text' : '/audio/transcriptions'), { method: 'POST', headers: auth(provider, key), body: f });
   } catch {
     throw new Error('Δεν υπάρχει σύνδεση στο διαδίκτυο.');
   }
-  if (r.status === 401) throw Object.assign(new Error('Λάθος κλειδί API — έλεγξέ το στις Ρυθμίσεις.'), { fatal: true });
+  if (await badKey(r)) throw Object.assign(new Error('Λάθος κλειδί API — έλεγξέ το στις Ρυθμίσεις.'), { fatal: true });
   if (!r.ok) throw new Error(`Σφάλμα διακομιστή ${r.status}: ${(await r.text()).slice(0, 160)}`);
   used(provider, diarize ? 'meeting' : 'captions', model, pcm.length / SR);
-  return r.json();
+  return el ? scribeSegments(await r.json()) : r.json();
+}
+
+/**
+ * Scribe's words (spaces and "(laughter)"-style sound tags are words too) → Mistral's { text, segments: [{ start, text, speaker_id }] },
+ * a segment per run of one speaker; no segments without diarization.
+ */
+function scribeSegments(j) {
+  const segs = [];
+  for (const w of j.words || []) {
+    const last = segs[segs.length - 1];
+    if (w.type !== 'spacing' && (!last || w.speaker_id !== last.speaker_id)) segs.push({ start: w.start || 0, speaker_id: w.speaker_id ?? null, text: w.text });
+    else if (last) last.text += w.text;
+  }
+  return { text: j.text || '', segments: segs.some(x => x.speaker_id != null) ? segs : [] };
 }
 
 /** Mistral only: speech straight into `lang` in one call (Voxtral chat with audio), no Greek text in between. */
@@ -200,16 +236,16 @@ async function translateAudio(key, pcm, lang) {
 }
 
 /** One system + user turn through the provider's small chat model. */
-async function chat(key, provider, system, user, temperature = 0, feature = 'chat') {
-  const p = PROVIDERS[provider];
+async function chat(key, provider, system, user, temperature = 0, feature = 'chat', model = '') {
+  const p = PROVIDERS[provider], m = model || p.chat;
   const r = await fetch(p.api + '/chat/completions', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: p.chat, temperature, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+    body: JSON.stringify({ model: m, temperature, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
   });
   if (!r.ok) throw new Error(`${p.name} ${r.status}`);
   const j = await r.json(), u = j.usage || {};
-  used(provider, feature, p.chat, 0, u.prompt_tokens || 0, u.completion_tokens || 0);
+  used(provider, feature, m, 0, u.prompt_tokens || 0, u.completion_tokens || 0);
   return (j.choices[0].message.content || '').trim();
 }
 
@@ -228,7 +264,7 @@ async function suggestQuestions(key, provider, lesson) {
 }
 
 // reading aloud in the cloud; Mistral has no Greek voice, but its English ones read Greek well
-const TTS = { mistral: 'voxtral-mini-tts-3', openai: 'gpt-4o-mini-tts' };
+const TTS = { mistral: 'voxtral-mini-tts-3', openai: 'gpt-4o-mini-tts', elevenlabs: 'eleven_multilingual_v2' };
 const OPENAI_VOICES = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse'];
 
 /** Mistral's preset voices as [id, "Name (lang)"], all pages. */
@@ -243,28 +279,37 @@ async function mistralVoices(key) {
   }
 }
 
+/** The account's ElevenLabs voices (premade and the school's own) as [id, "Name (accent)"]; all speak Greek with this model. */
+async function elevenVoices(key) {
+  // shortcut: the first 100 voices, enough for a school account; page with next_page_token if one has more
+  const r = await fetch('https://api.elevenlabs.io/v2/voices?page_size=100', { headers: auth('elevenlabs', key) });
+  if (!r.ok) throw new Error('φωνές ' + r.status);
+  return ((await r.json()).voices || []).map(v => [v.voice_id, v.name + (v.labels?.accent ? ` (${v.labels.accent})` : '')]);
+}
+
 /** One piece of text → mp3 bytes. */
 async function synthesize(key, provider, text, voice) {
-  const p = PROVIDERS[provider], model = TTS[provider];
-  const body = provider === 'mistral' ? { model, input: text, voice_id: voice, response_format: 'mp3' }
+  const p = PROVIDERS[provider], model = TTS[provider], el = provider === 'elevenlabs';
+  const body = el ? { model_id: model, text } : provider === 'mistral' ? { model, input: text, voice_id: voice, response_format: 'mp3' }
     : { model, input: text, voice, response_format: 'mp3' };
+  const url = el ? `${p.api}/text-to-speech/${encodeURIComponent(voice)}?output_format=mp3_44100_128` : p.api + '/audio/speech';
   let r;
   try {
-    r = await fetch(p.api + '/audio/speech', { method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    r = await fetch(url, { method: 'POST', headers: { ...auth(provider, key), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   } catch {
     throw new Error('Δεν υπάρχει σύνδεση στο διαδίκτυο.');
   }
   if (!r.ok) throw new Error(`${p.name} ${r.status}: ${(await r.text()).slice(0, 120)}`);
   used(provider, 'read', model, 0, 0, 0, text.length);
-  if (provider === 'openai') return r.arrayBuffer();
+  if (provider !== 'mistral') return r.arrayBuffer();
   return Uint8Array.from(atob((await r.json()).audio_data), c => c.charCodeAt(0)).buffer;
 }
 
 /** 'ok' | 'bad' | 'offline' | 'error' */
 async function checkKey(key, provider = 'mistral') {
   try {
-    const r = await fetch(PROVIDERS[provider].api + '/models', { headers: { Authorization: 'Bearer ' + key } });
-    return r.ok ? 'ok' : r.status === 401 ? 'bad' : 'error';
+    const r = await fetch(PROVIDERS[provider].api + '/models', { headers: auth(provider, key) });
+    return r.ok ? 'ok' : await badKey(r) ? 'bad' : 'error';
   } catch {
     return 'offline';
   }
@@ -391,6 +436,63 @@ function ttsChunks(text) {
   return out;
 }
 
+/** Words → lines of at most `max` characters (a longer single word keeps its own line). */
+function wrapWords(text, max = 16) {
+  const out = [];
+  for (const w of String(text).split(/\s+/).filter(Boolean)) {
+    if (out.length && (out[out.length - 1] + ' ' + w).length <= max) out[out.length - 1] += ' ' + w;
+    else out.push(w);
+  }
+  return out.length ? out : [''];
+}
+
+/**
+ * Concept map { label, children: [{ label, link, children }] } → a radial layout: the main idea in the middle, its
+ * branches on a ring, each branch's details fanned out beyond it. Boxes are sized from the text (px at font size `fs`).
+ */
+function conceptLayout(tree, fs = 22) {
+  const nodes = [], edges = [];
+  const box = (label, x, y, level) => {
+    const lines = wrapWords(label, level ? 16 : 14), size = level ? fs : fs * 1.25;
+    const n = { x, y, lines, level, size, w: Math.max(...lines.map(l => l.length)) * size * 0.6 + 28, h: lines.length * size * 1.25 + 18 };
+    nodes.push(n);
+    return n;
+  };
+  const root = box(tree.label || '', 0, 0, 0);
+  const kids = (tree.children || []).slice(0, 7), n = kids.length;
+  // an ellipse, wider than tall like the screen it is drawn on
+  const R1 = 120 + n * 14, R2 = R1 + 130, W = 1.6, H = 0.85;
+  kids.forEach((k, i) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / n;
+    const c = box(k.label || '', W * R1 * Math.cos(a), H * R1 * Math.sin(a), 1);
+    edges.push({ from: root, to: c, label: k.link || '' });
+    const gs = (k.children || []).slice(0, 4), spread = Math.min(2 * Math.PI / Math.max(n, 1), 1.3) * 0.8;
+    gs.forEach((g, j) => {
+      const b = a + (gs.length > 1 ? spread * (j / (gs.length - 1) - 0.5) : 0);
+      const d = box(g.label || '', W * R2 * Math.cos(b), H * R2 * Math.sin(b), 2);
+      edges.push({ from: c, to: d, label: g.link || '' });
+    });
+  });
+  // boxes of neighbouring branches can touch: push each one that does outward along its own ray until it is free
+  const hit = (p, q) => Math.abs(p.x - q.x) < (p.w + q.w) / 2 + 8 && Math.abs(p.y - q.y) < (p.h + q.h) / 2 + 8;
+  nodes.forEach((m, i) => {
+    const r = Math.hypot(m.x, m.y);
+    if (!r) return;
+    for (let k = 0; k < 60 && nodes.slice(0, i).some(o => hit(m, o)); k++) { m.x += 15 * m.x / r; m.y += 15 * m.y / r; }
+  });
+  const pad = 20;
+  const minX = Math.min(...nodes.map(m => m.x - m.w / 2)) - pad, maxX = Math.max(...nodes.map(m => m.x + m.w / 2)) + pad;
+  const minY = Math.min(...nodes.map(m => m.y - m.h / 2)) - pad, maxY = Math.max(...nodes.map(m => m.y + m.h / 2)) + pad;
+  return { nodes, edges, view: [minX, minY, maxX - minX, maxY - minY] };
+}
+
+/** The model's reply → a concept tree, or null; it sometimes wraps the JSON in ``` fences or adds a sentence. */
+function parseConcept(text) {
+  const m = /\{[\s\S]*\}/.exec(String(text));
+  if (!m) return null;
+  try { const t = JSON.parse(m[0]); return t && t.label ? t : null; } catch { return null; }
+}
+
 // «Μικρόφωνο PC»: what the computer's QR code carries to the phone — every address it has, its port, code and name
 const pairText = ({ addrs, port, code, pc }) => `voicemic:1?a=${addrs.join(',')}&p=${port}&c=${code}&n=${encodeURIComponent(pc)}`;
 // anything can be shown to the camera: accept only plain IPv4 addresses, a port and a 4-digit code
@@ -404,5 +506,5 @@ function parsePair(text) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { MODEL_URL, MODEL_PACKS, PROVIDERS, PRICES, cost, dayKey, usageLoad, usageAdd, usageSummary, SR, FRAME, CHUNK, CUT_WINDOW, rms, quietestCut, isSilent, concat, wav, stamp, terms, speakerLines, Vad, AutoMixer, pairText, parsePair, ttsChunks };
+  module.exports = { MODEL_URL, MODEL_PACKS, PROVIDERS, PRICES, cost, dayKey, usageLoad, usageAdd, usageSummary, SR, FRAME, CHUNK, CUT_WINDOW, rms, quietestCut, isSilent, concat, wav, stamp, terms, speakerLines, scribeSegments, keyterms, Vad, AutoMixer, pairText, parsePair, ttsChunks, wrapWords, conceptLayout, parseConcept };
 }

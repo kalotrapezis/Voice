@@ -13,6 +13,18 @@ assert.deepStrictEqual(v.speakerLines({ segments: [
   { t: 90, who: 'Ομιλητής 1', text: 'Τέλος.' }]);
 assert.deepStrictEqual(v.speakerLines({ text: ' σκέτο ' }), [{ t: 0, who: '', text: 'σκέτο' }]);
 
+// ElevenLabs Scribe: words (spaces and sound tags too) → speaker runs that speakerLines numbers; none without diarization
+{
+  const w = (text, speaker_id, start, type = 'word') => ({ text, speaker_id, start, type });
+  const j = { text: 'Καλημέρα παιδιά. (γέλια) Γεια.', words: [w('Καλημέρα', 'speaker_0', 0.1), w(' ', 'speaker_0', 0.5, 'spacing'), w('παιδιά.', 'speaker_0', 0.6),
+    w(' ', 'speaker_0', 1, 'spacing'), w('(γέλια)', null, 1.2, 'audio_event'), w(' ', null, 2, 'spacing'), w('Γεια.', 'speaker_1', 2.1)] };
+  assert.deepStrictEqual(v.speakerLines(v.scribeSegments(j), 25), [
+    { t: 25.1, who: 'Ομιλητής 1', text: 'Καλημέρα παιδιά.' }, { t: 26.2, who: '', text: '(γέλια)' }, { t: 27.1, who: 'Ομιλητής 2', text: 'Γεια.' }]);
+  assert.deepStrictEqual(v.scribeSegments({ text: 'σκέτο', words: [w('σκέτο', null, 0)] }), { text: 'σκέτο', segments: [] });
+  assert.deepStrictEqual(v.keyterms(['jamovi', 'a<b', 'one two three four five six', 'x\\y', 't-test']), ['jamovi', 't-test']);
+  assert.ok(Math.abs(v.cost('scribe_v2', 3600) - 0.25) < 1e-9 && Math.abs(v.cost('eleven_multilingual_v2', 0, 0, 0, 1000) - 0.08) < 1e-9);
+}
+
 assert.strictEqual(v.stamp(3725.9), '01:02:05');
 
 // the cut lands on the quiet frame inside the last 5 s
@@ -115,5 +127,17 @@ assert.deepStrictEqual(mmsIds('Να', { 'ν': 5, 'α': 7, ' ': 1 }), [0, 1, 0, 1
   // a stored ledger wins over the old total; a broken one starts again from it
   assert.strictEqual(Object.keys(v.usageLoad(JSON.stringify(log), '{}').days).length, 4);
   assert.deepStrictEqual(v.usageLoad('{broken', '').days, {});
+}
+// concept map: wrapping, the reply parser, and a layout where no two boxes overlap
+{
+  assert.deepStrictEqual(v.wrapWords('διοξείδιο του άνθρακα και νερό', 16), ['διοξείδιο του', 'άνθρακα και νερό']);
+  assert.deepStrictEqual(v.parseConcept('Ορίστε:\n```json\n{"label":"Φωτοσύνθεση","children":[]}\n```').label, 'Φωτοσύνθεση');
+  assert.strictEqual(v.parseConcept('όχι json'), null);
+  const kid = (l, n) => ({ label: l, link: 'έχει', children: Array.from({ length: n }, (_, i) => ({ label: l + ' λεπτομέρεια ' + i })) });
+  const m = v.conceptLayout({ label: 'Φωτοσύνθεση', children: [kid('φως ήλιου', 2), kid('χλωροφύλλη', 3), kid('οξυγόνο', 1), kid('γλυκόζη', 4), kid('νερό', 0), kid('φύλλα', 2)] });
+  assert.strictEqual(m.nodes.length, 1 + 6 + 12);
+  assert.strictEqual(m.edges.length, 6 + 12);
+  const hit = (a, b) => Math.abs(a.x - b.x) < (a.w + b.w) / 2 && Math.abs(a.y - b.y) < (a.h + b.h) / 2;
+  for (const a of m.nodes) for (const b of m.nodes) if (a !== b) assert.ok(!hit(a, b), `${a.lines} overlaps ${b.lines}`);
 }
 console.log('voxtral.js OK');

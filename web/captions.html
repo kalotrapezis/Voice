@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VOICE captions</title>
+<!-- the caption overlay (electron/main.js cap:open): transparent, the mouse passes through; only the words show -->
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  #t { position: absolute; left: 6%; right: 6%; bottom: 14px; max-height: calc(100% - 20px); overflow: hidden;
+    display: flex; flex-direction: column; justify-content: flex-end; text-align: center;
+    font: 600 clamp(26px, 3.4vw, 48px)/1.25 "Noto Sans", system-ui, sans-serif; color: #fff;
+    /* readable on any background: a dark outline painted under the letters, plus a soft shadow */
+    -webkit-text-stroke: 6px rgba(0, 0, 0, .85); paint-order: stroke fill; text-shadow: 0 2px 8px rgba(0, 0, 0, .7); }
+  .partial { opacity: .75; }
+</style>
+<div id="t" aria-live="polite"></div>
+<script>
+  const t = document.getElementById('t');
+  // Wayland: the mouse cannot pass through, so the words step aside (main.js cap:dodge)
+  addEventListener('mousemove', () => voiceElectron.capDodge());
+  // { text, partial }: the newest words; the box keeps the last lines that fit, bottom-aligned
+  voiceElectron.onCapText(({ text = '', partial = '' }) => {
+    const p = document.createElement('span');
+    p.className = 'partial';
+    p.textContent = partial ? ' ' + partial : '';
+    const div = document.createElement('div');
+    div.append(text, p);
+    t.replaceChildren(div);
+  });
+</script>

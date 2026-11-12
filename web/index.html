@@ -13,6 +13,7 @@
       <button class="nav-item" data-page="dictate"><span data-icon="mic"></span><span>Υπαγόρευση</span></button>
       <button class="nav-item" data-page="meeting"><span data-icon="meeting"></span><span>Σύσκεψη</span></button>
       <button class="nav-item" data-page="prompt"><span data-icon="prompt"></span><span>Teleprompt</span></button>
+      <button class="nav-item" data-page="outline"><span data-icon="tree"></span><span>Σχεδιάγραμμα</span></button>
       <button class="nav-item" data-page="read"><span data-icon="speaker"></span><span>Ανάγνωση</span></button>
       <button class="nav-item" data-page="pcmic"><span data-icon="phone"></span><span>Μικρόφωνο PC</span></button>
       <button class="nav-item foot" data-page="usage"><span data-icon="chart"></span><span>Κόστος</span></button>
@@ -90,6 +91,7 @@
           </div>
           <button class="round" id="contrastBtn" aria-label="Σκούρο ή φωτεινό φόντο"><span data-icon="contrast"></span></button>
           <button class="round" id="fullBtn" aria-label="Πλήρης οθόνη"><span data-icon="fullscreen"></span></button>
+          <button class="round" id="overlayBtn" hidden aria-label="Υπότιτλοι πάνω από όλα τα προγράμματα" title="Υπότιτλοι πάνω από όλα τα προγράμματα, το ποντίκι περνά από κάτω"><span data-icon="open"></span></button>
           <button class="round" id="promptClear" aria-label="Καθαρισμός"><span data-icon="clear"></span></button>
         </div>
         <div class="prompt-side island">
@@ -109,6 +111,36 @@
       </section>
 
       <!-- Μικρόφωνο PC (phone/tablet): this device becomes one more microphone for VOICE on a computer -->
+      <!-- the lesson's outline, built by the AI from the teleprompt's captions (and today's lesson plan, if given) -->
+      <section class="page" id="outline">
+        <h1>Σχεδιάγραμμα μαθήματος</h1>
+        <div class="recorder island">
+          <button class="pill-button primary" id="outlineRec"></button>
+          <span class="hint">ή από ολόκληρο κείμενο:</span>
+          <button class="pill-button" id="outlineFromPrompt">Από Teleprompt</button>
+          <button class="pill-button" id="outlineFromMeeting">Από Σύσκεψη</button>
+          <button class="pill-button" id="outlineFromFile"><span data-icon="open"></span>Από αρχείο…</button>
+          <input type="file" id="outlineFile" accept=".txt,.md,text/plain,text/markdown" hidden>
+          <p class="hint" id="outlineStatus">Χτίζεται μόνο του από όσα λέγονται στον Teleprompt, με οδηγό το «Σημερινό μάθημα» από τις Ρυθμίσεις.</p>
+        </div>
+        <div class="segmented" id="outlineView" role="radiogroup" aria-label="Προβολή"></div>
+        <div class="island transcript outline" id="outlineBox" aria-live="polite"></div>
+        <div class="island transcript concept" id="outlineMap" hidden>
+          <div class="map-svg" id="mapSvg"></div>
+          <div class="map-tools">
+            <button class="round" id="mapIn" aria-label="Μεγέθυνση">+</button>
+            <button class="round" id="mapOut" aria-label="Σμίκρυνση">−</button>
+            <button class="round" id="mapFit" aria-label="Όλος ο χάρτης">⤢</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="pill-button primary" id="outlineSum">Σύνοψη μαθήματος</button>
+          <button class="pill-button" id="outlineSave"><span data-icon="save"></span>Αποθήκευση</button>
+          <button class="pill-button" id="outlinePdf" hidden><span data-icon="share"></span>PDF</button>
+          <button class="pill-button" id="outlineClear"><span data-icon="clear"></span>Καθαρισμός</button>
+        </div>
+      </section>
+
       <section class="page" id="pcmic">
         <div class="pair" id="pairView">
           <h1>Μικρόφωνο PC</h1>
@@ -219,8 +251,13 @@
         </div>
         <div class="settings-card island">
           <h2>Λέξεις που πρέπει να γράφει σωστά</h2>
-          <p class="hint">Ειδικοί όροι ή ονόματα, χωρισμένα με κόμμα (μόνο Mistral και OpenAI).</p>
+          <p class="hint">Ειδικοί όροι ή ονόματα, χωρισμένα με κόμμα.</p>
           <input id="termsField" class="field" spellcheck="false">
+          <h2>Σημερινό μάθημα <span class="hint">(προαιρετικό)</span></h2>
+          <p class="hint">Επικόλλησε το πλάνο του μαθήματος: το AI κρατά τους όρους και τα ονόματά του, ώστε οι υπότιτλοι να τα γράφουν σωστά. Θέλει internet μόνο τώρα, όχι στην τάξη.</p>
+          <textarea id="lessonPlan" class="field" rows="4" placeholder="Επικόλληση πλάνου μαθήματος…"></textarea>
+          <div class="actions"><button class="pill-button" id="lessonBtn">Βρες τους όρους</button></div>
+          <input id="lessonTerms" class="field" spellcheck="false" placeholder="Όροι του μαθήματος (κενό: κανένας)">
         </div>
 
         <h2 class="group">Ανάγνωση</h2>
@@ -244,7 +281,7 @@
 
         <h2 class="group">Σύσκεψη</h2>
         <div class="settings-card island">
-          <label class="check"><input type="checkbox" id="diarizeBox"> Αναγνώριση ομιλητών στο τέλος (Ομιλητής 1, 2…), μόνο με Mistral</label>
+          <label class="check"><input type="checkbox" id="diarizeBox"> Αναγνώριση ομιλητών (Ομιλητής 1, 2…): στη σύσκεψη στο τέλος, με Mistral ή ElevenLabs· ζωντανά στους υπότιτλους, με ElevenLabs</label>
           <p class="hint">Όταν σταματήσεις, όλη η ηχογράφηση ξαναστέλνεται μία φορά για να χωριστούν οι ομιλητές. Με «Και τα δύο» οι ετικέτες είναι «Εγώ» και «Ηχεία».</p>
         </div>
       </section>
@@ -257,7 +294,7 @@
       <h1>Καλώς ήρθατε στο VOICE</h1>
       <p>Πώς θα δουλεύει η αναγνώριση και η ανάγνωση;</p>
       <button class="pill-button primary" id="welcomeLocal"><span>Δωρεάν, σε αυτόν τον υπολογιστή<br><small>λήψη <span id="welcomeSize"></span> μία φορά, μετά χωρίς internet</small></span></button>
-      <button class="pill-button" id="welcomeKey"><span>Έχω κλειδί API (Mistral ή OpenAI)<br><small>πιο ακριβές, με internet, χρέωση ανά λεπτό</small></span></button>
+      <button class="pill-button" id="welcomeKey"><span>Έχω κλειδί API (Mistral, OpenAI ή ElevenLabs)<br><small>πιο ακριβές, με internet, χρέωση ανά λεπτό</small></span></button>
       <p class="hint">Μπορείτε να το αλλάξετε όποτε θέλετε στις Ρυθμίσεις.</p>
     </div>
   </div>
